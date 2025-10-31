@@ -1,20 +1,21 @@
 import { isFullSegmentEncryption } from '../utils/encryption-methods-util';
+import { hexToArrayBuffer } from '../utils/hex';
 import { convertDataUriToArrayBytes } from '../utils/keysystem-util';
 import { logger } from '../utils/logger';
 import { KeySystemFormats, parsePlayReadyWRM } from '../utils/mediakeys-helper';
 import { mp4pssh } from '../utils/mp4-tools';
 
-let keyUriToKeyIdMap: { [uri: string]: Uint8Array } = {};
+let keyUriToKeyIdMap: { [uri: string]: Uint8Array<ArrayBuffer> } = {};
 
 export interface DecryptData {
   uri: string;
   method: string;
   keyFormat: string;
   keyFormatVersions: number[];
-  iv: Uint8Array | null;
-  key: Uint8Array | null;
-  keyId: Uint8Array | null;
-  pssh: Uint8Array | null;
+  iv: Uint8Array<ArrayBuffer> | null;
+  key: Uint8Array<ArrayBuffer> | null;
+  keyId: Uint8Array<ArrayBuffer> | null;
+  pssh: Uint8Array<ArrayBuffer> | null;
   encrypted: boolean;
   isCommonEncryption: boolean;
 }
@@ -26,10 +27,10 @@ export class LevelKey implements DecryptData {
   public readonly keyFormatVersions: number[];
   public readonly encrypted: boolean;
   public readonly isCommonEncryption: boolean;
-  public iv: Uint8Array | null = null;
-  public key: Uint8Array | null = null;
-  public keyId: Uint8Array | null = null;
-  public pssh: Uint8Array | null = null;
+  public iv: Uint8Array<ArrayBuffer> | null = null;
+  public key: Uint8Array<ArrayBuffer> | null = null;
+  public keyId: Uint8Array<ArrayBuffer> | null = null;
+  public pssh: Uint8Array<ArrayBuffer> | null = null;
 
   static clearKeyUriToKeyIdMap() {
     keyUriToKeyIdMap = {};
@@ -40,7 +41,8 @@ export class LevelKey implements DecryptData {
     uri: string,
     format: string,
     formatversions: number[] = [1],
-    iv: Uint8Array | null = null,
+    iv: Uint8Array<ArrayBuffer> | null = null,
+    keyId?: string,
   ) {
     this.method = method;
     this.uri = uri;
@@ -50,6 +52,20 @@ export class LevelKey implements DecryptData {
     this.encrypted = method ? method !== 'NONE' : false;
     this.isCommonEncryption =
       this.encrypted && !isFullSegmentEncryption(method);
+    if (keyId?.startsWith('0x')) {
+      this.keyId = new Uint8Array(hexToArrayBuffer(keyId));
+    }
+  }
+
+  public matches(key: LevelKey): boolean {
+    return (
+      key.uri === this.uri &&
+      key.method === this.method &&
+      key.encrypted === this.encrypted &&
+      key.keyFormat === this.keyFormat &&
+      key.keyFormatVersions.join(',') === this.keyFormatVersions.join(',') &&
+      key.iv?.join(',') === this.iv?.join(',')
+    );
   }
 
   public isSupported(): boolean {
@@ -113,6 +129,10 @@ export class LevelKey implements DecryptData {
       return this;
     }
 
+    if (this.pssh && this.keyId) {
+      return this;
+    }
+
     // Initialize keyId if possible
     const keyBytes = convertDataUriToArrayBytes(this.uri);
     if (keyBytes) {
@@ -121,12 +141,10 @@ export class LevelKey implements DecryptData {
           // Setting `pssh` on this LevelKey/DecryptData allows HLS.js to generate a session using
           // the playlist-key before the "encrypted" event. (Comment out to only use "encrypted" path.)
           this.pssh = keyBytes;
-          // In case of widevine keyID is embedded in PSSH box. Read Key ID.
-          if (keyBytes.length >= 22) {
-            this.keyId = keyBytes.subarray(
-              keyBytes.length - 22,
-              keyBytes.length - 6,
-            );
+          // In case of Widevine, if KEYID is not in the playlist, assume only two fields in the pssh KEY tag URI.
+          if (!this.keyId && keyBytes.length >= 22) {
+            const offset = keyBytes.length - 22;
+            this.keyId = keyBytes.subarray(offset, offset + 16);
           }
           break;
         case KeySystemFormats.PLAYREADY: {
@@ -174,7 +192,7 @@ export class LevelKey implements DecryptData {
   }
 }
 
-function createInitializationVector(segmentNumber: number): Uint8Array {
+function createInitializationVector(segmentNumber: number) {
   const uint8View = new Uint8Array(16);
   for (let i = 12; i < 16; i++) {
     uint8View[i] = (segmentNumber >> (8 * (15 - i))) & 0xff;

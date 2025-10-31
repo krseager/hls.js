@@ -3,7 +3,7 @@ import type { DateRange, DateRangeCue } from './date-range';
 import type { MediaFragmentRef } from './fragment';
 import type { Loader, LoaderContext } from '../types/loader';
 
-export const ALIGNED_END_THRESHOLD_SECONDS = 0.02;
+export const ALIGNED_END_THRESHOLD_SECONDS = 0.025;
 
 export type PlaybackRestrictions = {
   skip: boolean;
@@ -38,8 +38,8 @@ export type InterstitialAssetItem = {
   parentIdentifier: InterstitialId;
   identifier: InterstitialAssetId;
   duration: number | null;
-  startOffset: number;
-  timelineStart: number;
+  startOffset: number; // asset start offset from start of interstitial event
+  timelineStart: number; // asset start on media element timeline
   uri: string;
   error?: Error;
 };
@@ -76,6 +76,7 @@ export class InterstitialEvent {
   public assetListResponse: AssetListJSON | null = null;
   public resumeAnchor?: MediaFragmentRef;
   public error?: Error;
+  public resetOnResume?: boolean;
 
   constructor(dateRange: DateRange, base: BaseData) {
     this.base = base;
@@ -104,19 +105,30 @@ export class InterstitialEvent {
   }
 
   public reset() {
+    this.appendInPlaceStarted = false;
     this.assetListLoader?.destroy();
-    this.assetListLoader = this.error = undefined;
+    this.assetListLoader = undefined;
+    if (!this.supplementsPrimary) {
+      this.assetListResponse = null;
+      this.assetList = [];
+      this._duration = null;
+    }
+    // `error?` is reset when seeking back over interstitial `startOffset`
+    //  using `schedule.resetErrorsInRange(start, end)`.
   }
 
   public isAssetPastPlayoutLimit(assetIndex: number): boolean {
-    if (assetIndex >= this.assetList.length) {
+    if (assetIndex > 0 && assetIndex >= this.assetList.length) {
       return true;
     }
     const playoutLimit = this.playoutLimit;
     if (assetIndex <= 0 || isNaN(playoutLimit)) {
       return false;
     }
-    const assetOffset = this.assetList[assetIndex].startOffset;
+    if (playoutLimit === 0) {
+      return true;
+    }
+    const assetOffset = this.assetList[assetIndex]?.startOffset || 0;
     return assetOffset > playoutLimit;
   }
 
@@ -149,6 +161,19 @@ export class InterstitialEvent {
     return this.cue.pre ? 0 : this.startTime;
   }
 
+  get startIsAligned(): boolean {
+    if (this.startTime === 0 || this.snapOptions.out) {
+      return true;
+    }
+    const frag = this.dateRange.tagAnchor;
+    if (frag) {
+      const startTime = this.dateRange.startTime;
+      const snappedStart = getSnapToFragmentTime(startTime, frag);
+      return startTime - snappedStart < 0.1;
+    }
+    return false;
+  }
+
   get resumptionOffset(): number {
     const resumeOffset = this.resumeOffset;
     const offset = Number.isFinite(resumeOffset) ? resumeOffset : this.duration;
@@ -168,13 +193,16 @@ export class InterstitialEvent {
   }
 
   get appendInPlace(): boolean {
+    if (this.appendInPlaceStarted) {
+      return true;
+    }
     if (this.appendInPlaceDisabled) {
       return false;
     }
     if (
       !this.cue.once &&
       !this.cue.pre && // preroll starts at startPosition before startPosition is known (live)
-      (this.startTime === 0 || this.snapOptions.out) &&
+      this.startIsAligned &&
       ((isNaN(this.playoutLimit) && isNaN(this.resumeOffset)) ||
         (this.resumeOffset &&
           this.duration &&
@@ -188,6 +216,7 @@ export class InterstitialEvent {
 
   set appendInPlace(value: boolean) {
     if (this.appendInPlaceStarted) {
+      this.resetOnResume = !value;
       return;
     }
     this.appendInPlaceDisabled = !value;
@@ -208,7 +237,7 @@ export class InterstitialEvent {
   get duration(): number {
     const playoutLimit = this.playoutLimit;
     let duration: number;
-    if (this._duration) {
+    if (this._duration !== null) {
       duration = this._duration;
     } else if (this.dateRange.duration) {
       duration = this.dateRange.duration;
@@ -256,6 +285,10 @@ export class InterstitialEvent {
     return this.base.url;
   }
 
+  get assetListLoaded(): boolean {
+    return this.assetList.length > 0 || this.assetListResponse !== null;
+  }
+
   toString(): string {
     return eventToString(this);
   }
@@ -281,6 +314,16 @@ export function getInterstitialUrl(
     url.searchParams.set('_HLS_primary_id', sessionId);
   }
   return url;
+}
+
+export function getNextAssetIndex(
+  interstitial: InterstitialEvent,
+  assetListIndex: number,
+): number {
+  while (interstitial.assetList[++assetListIndex]?.error) {
+    /* no-op */
+  }
+  return assetListIndex;
 }
 
 function eventToString(interstitial: InterstitialEvent): string {

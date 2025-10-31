@@ -9,6 +9,7 @@ import M3U8Parser from '../../../src/loader/m3u8-parser';
 import { Level } from '../../../src/types/level';
 import { PlaylistLevelType } from '../../../src/types/loader';
 import { AttrList } from '../../../src/utils/attr-list';
+import { MockMediaElement } from '../utils/mock-media';
 import type { HlsConfig } from '../../../src/config';
 import type { InterstitialScheduleItem } from '../../../src/controller/interstitials-schedule';
 import type {
@@ -17,6 +18,7 @@ import type {
 } from '../../../src/types/component-api';
 
 chai.use(sinonChai);
+chai.config.truncateThreshold = 0;
 const expect = chai.expect;
 
 type HlsTestable = Omit<Hls, 'networkControllers' | 'coreComponents'> & {
@@ -33,15 +35,17 @@ class HLSTestPlayer extends Hls {
     hlsTestable.networkControllers.length = 0;
     hlsTestable.coreComponents.forEach((component) => component.destroy());
     hlsTestable.coreComponents.length = 0;
+    hlsTestable.on(Events.MEDIA_ATTACHING, (t, data) => {
+      data.media.src = '';
+    });
+    hlsTestable.on(Events.MEDIA_DETACHING, () => {
+      const media = hlsTestable.media;
+      if (media) {
+        media.removeAttribute('src');
+        media.load();
+      }
+    });
   }
-}
-
-class MockMediaElement {
-  public currentTime: number = 0;
-  public duration: number = Infinity;
-  public textTracks: any[] = [];
-  addEventListener() {}
-  removeEventListener() {}
 }
 
 function expectItemToHaveProperties(
@@ -113,6 +117,17 @@ describe('InterstitialsController', function () {
     return hls.trigger.getCalls().map((_call) => _call.args[0]);
   }
 
+  function attachMediaToHls() {
+    const media = new MockMediaElement();
+    hls.attachMedia(media as unknown as HTMLMediaElement);
+    (hls as any).bufferController.media = media;
+    hls.trigger(Events.MEDIA_ATTACHED, {
+      media: media as unknown as HTMLMediaElement,
+      mediaSource: {} as any,
+    });
+    return media;
+  }
+
   function setLoadedLevelDetails(playlist: string) {
     const details = M3U8Parser.parseLevelPlaylist(
       playlist,
@@ -122,6 +137,7 @@ describe('InterstitialsController', function () {
       0,
       null,
     );
+    expect(details.playlistParsingError).to.equal(null);
     const attrs = new AttrList({});
     const level = new Level({
       name: '',
@@ -129,14 +145,29 @@ describe('InterstitialsController', function () {
       attrs,
       bitrate: 0,
     });
-    (hls as any).levelController._levels[0] = level;
     level.details = details;
+    (hls as any).levelController._levels[0] = level;
+    (hls as any).streamController.startPosition = details.live
+      ? details.totalduration - details.targetduration * 3
+      : 0;
+    hls.trigger(Events.LEVEL_UPDATED, {
+      details,
+      level: 0,
+    });
     return details;
   }
 
   beforeEach(function () {
     hls = new HLSTestPlayer({
-      debug: true,
+      // debug: true,
+      debug: {
+        trace: () => null,
+        debug: () => null,
+        log: () => null,
+        warn: () => null,
+        info: () => null,
+        error: () => null,
+      },
     }) as unknown as HlsTestable;
     interstitialsController = new InterstitialsController(
       hls as unknown as Hls,
@@ -163,11 +194,9 @@ fileSequence3.ts
 #EXTINF:6,
 fileSequence4.ts
 #EXT-X-ENDLIST`;
-      const details = setLoadedLevelDetails(playlist);
-      hls.trigger(Events.LEVEL_UPDATED, {
-        details,
-        level: 0,
-      });
+      attachMediaToHls();
+      hls.trigger.resetHistory();
+      setLoadedLevelDetails(playlist);
       const insterstitials = interstitialsController.interstitialsManager;
       if (!insterstitials) {
         expect(insterstitials, 'interstitialsManager').to.be.an('object');
@@ -178,9 +207,6 @@ fileSequence4.ts
       expect(insterstitials.playingIndex).to.equal(0, 'playingIndex');
       expect(insterstitials.events).is.an('array').which.has.lengthOf(1);
       expect(schedule).is.an('array').which.has.lengthOf(2);
-      if (!insterstitials.events || !schedule) {
-        return;
-      }
       const interstitialEvent = insterstitials.events[0];
       expect(interstitialEvent.identifier).to.equal('0');
       expect(interstitialEvent.restrictions.jump).to.equal(true);
@@ -221,11 +247,14 @@ fileSequence4.ts
         },
       ]);
       expect(interstitialEvent).to.equal(schedule[1].event);
-      expect(hls.trigger).to.have.callCount(3);
-      expect(hls.trigger).to.have.been.calledWith(Events.LEVEL_UPDATED);
-      expect(hls.trigger).to.have.been.calledWith(Events.INTERSTITIALS_UPDATED);
-      expect(hls.trigger).to.have.been.calledWith(
-        Events.INTERSTITIALS_BUFFERED_TO_BOUNDARY,
+      const eventsTriggered = getTriggerCalls();
+      expect(eventsTriggered).to.deep.equal(
+        [
+          Events.LEVEL_UPDATED,
+          Events.INTERSTITIALS_UPDATED,
+          Events.INTERSTITIALS_BUFFERED_TO_BOUNDARY,
+        ],
+        `Actual events after asset-list`,
       );
     });
 
@@ -248,11 +277,7 @@ fileSequence3.ts
 #EXTINF:10,
 fileSequence4.ts
 #EXT-X-ENDLIST`;
-      const details = setLoadedLevelDetails(playlist);
-      hls.trigger(Events.LEVEL_UPDATED, {
-        details,
-        level: 0,
-      });
+      setLoadedLevelDetails(playlist);
       const insterstitials = interstitialsController.interstitialsManager;
       if (!insterstitials) {
         expect(insterstitials, 'interstitialsManager').to.be.an('object');
@@ -265,11 +290,8 @@ fileSequence4.ts
         .is.an('array')
         .which.has.lengthOf(
           7,
-          `Schedule items: ${schedule?.map((item) => `${item.start}-${item.end}`).join(', ')}`,
+          `Schedule items: ${schedule.map((item) => `${item.start}-${item.end}`).join(', ')}`,
         );
-      if (!events || !schedule) {
-        return;
-      }
       const eventAssertions = [
         {
           startTime: 0,
@@ -438,11 +460,7 @@ fileSequence2.ts
 #EXTINF:10,
 fileSequence3.ts
 #EXT-X-ENDLIST`;
-      const details = setLoadedLevelDetails(playlist);
-      hls.trigger(Events.LEVEL_UPDATED, {
-        details,
-        level: 0,
-      });
+      setLoadedLevelDetails(playlist);
       const insterstitials = interstitialsController.interstitialsManager;
       if (!insterstitials) {
         expect(insterstitials, 'interstitialsManager').to.be.an('object');
@@ -451,13 +469,10 @@ fileSequence3.ts
       const events = insterstitials.events;
       const schedule = insterstitials.schedule;
       expect(events).is.an('array').which.has.lengthOf(5);
-      const scheduleDebugString = `Schedule items: ${schedule?.map((item) => `[${item.event ? 'I' : 'P'}:${item.start}-${item.end}]`).join(', ')}`;
+      const scheduleDebugString = `Schedule items: ${schedule.map((item) => `[${item.event ? 'I' : 'P'}:${item.start}-${item.end}]`).join(', ')}`;
       expect(schedule)
         .is.an('array')
         .which.has.lengthOf(9, scheduleDebugString);
-      if (!events || !schedule) {
-        return;
-      }
       [
         'primary',
         '1',
@@ -471,12 +486,12 @@ fileSequence3.ts
       ].forEach((typeOrIdentifier, i) => {
         if (typeOrIdentifier === 'primary') {
           expect(
-            schedule?.[i],
+            schedule[i],
             `Expected to find a primary segment at index ${i}: ${scheduleDebugString}`,
           ).to.have.property('nextEvent');
         } else {
           expect(
-            schedule?.[i],
+            schedule[i],
             `Expected to find an Interstitial at index ${i}: ${scheduleDebugString}`,
           )
             .to.have.property('event')
@@ -685,11 +700,9 @@ fileSequence2.mp4
 #EXTINF:10,
 fileSequence3.mp4
 #EXT-X-ENDLIST`;
-      const details = setLoadedLevelDetails(playlist);
-      hls.trigger(Events.LEVEL_UPDATED, {
-        details,
-        level: 0,
-      });
+      attachMediaToHls();
+      hls.trigger.resetHistory();
+      setLoadedLevelDetails(playlist);
       const insterstitials = interstitialsController.interstitialsManager;
       if (!insterstitials) {
         expect(insterstitials, 'interstitialsManager').to.be.an('object');
@@ -700,9 +713,6 @@ fileSequence3.mp4
       expect(insterstitials.playingIndex).to.equal(0, 'playingIndex');
       expect(insterstitials.events).is.an('array').which.has.lengthOf(2);
       expect(schedule).is.an('array').which.has.lengthOf(4);
-      if (!insterstitials.events || !schedule) {
-        return;
-      }
       expect(insterstitials.events[0].identifier).to.equal('ad1');
       expect(insterstitials.events[1].identifier).to.equal('ad2');
       expect(insterstitials.events[0]).to.equal(schedule[0].event);
@@ -793,11 +803,7 @@ fileSequence2.mp4
 #EXTINF:10,
 fileSequence3.mp4
 #EXT-X-ENDLIST`;
-      const details = setLoadedLevelDetails(playlist);
-      hls.trigger(Events.LEVEL_UPDATED, {
-        details,
-        level: 0,
-      });
+      setLoadedLevelDetails(playlist);
       const insterstitials = interstitialsController.interstitialsManager;
       if (!insterstitials) {
         expect(insterstitials, 'interstitialsManager').to.be.an('object');
@@ -806,9 +812,6 @@ fileSequence3.mp4
       const schedule = insterstitials.schedule;
       expect(insterstitials.events).is.an('array').which.has.lengthOf(2);
       expect(schedule).is.an('array').which.has.lengthOf(2);
-      if (!insterstitials.events || !schedule) {
-        return;
-      }
       expect(insterstitials.events[0].identifier).to.equal('ad1');
       expect(insterstitials.events[1].identifier).to.equal('ad2');
       expect(insterstitials.events[0]).to.equal(schedule[0].event);
@@ -860,11 +863,7 @@ fileSequence3.ts
 #EXTINF:6,
 fileSequence4.ts
 #EXT-X-ENDLIST`;
-        const details = setLoadedLevelDetails(playlist);
-        hls.trigger(Events.LEVEL_UPDATED, {
-          details,
-          level: 0,
-        });
+        setLoadedLevelDetails(playlist);
         const insterstitials = interstitialsController.interstitialsManager;
         if (!insterstitials) {
           expect(insterstitials, 'interstitialsManager').to.be.an('object');
@@ -874,9 +873,6 @@ fileSequence4.ts
         const events = insterstitials.events;
         expect(events).is.an('array').which.has.lengthOf(1);
         expect(schedule).is.an('array').which.has.lengthOf(2);
-        if (!events || !schedule) {
-          return;
-        }
         expect(events[0]).to.deep.include({
           identifier: '0',
           timelineOccupancy: TimelineOccupancy.Point,
@@ -885,9 +881,6 @@ fileSequence4.ts
         });
         expect(insterstitials.primary).to.include({
           duration: 12,
-        });
-        expect(insterstitials.playout).to.include({
-          duration: 34,
         });
         expect(insterstitials.integrated).to.include({
           duration: 4,
@@ -962,11 +955,7 @@ fileSequence4.ts
             contentMayVary: false,
           },
         ];
-        const details = setLoadedLevelDetails(playlist);
-        hls.trigger(Events.LEVEL_UPDATED, {
-          details,
-          level: 0,
-        });
+        setLoadedLevelDetails(playlist);
         const insterstitials = interstitialsController.interstitialsManager;
         if (!insterstitials) {
           expect(insterstitials, 'interstitialsManager').to.be.an('object');
@@ -976,9 +965,6 @@ fileSequence4.ts
         const events = insterstitials.events;
         expect(events).is.an('array').which.has.lengthOf(4);
         expect(schedule).is.an('array').which.has.lengthOf(5);
-        if (!events || !schedule) {
-          return;
-        }
         eventAssertions.forEach((assertions, i) => {
           expect(events[i].identifier).to.equal('' + i);
           expect(events[i], `Interstitial Event "${i}"`).to.deep.include(
@@ -987,9 +973,6 @@ fileSequence4.ts
         });
         expect(insterstitials.primary).to.include({
           duration: 12,
-        });
-        expect(insterstitials.playout).to.include({
-          duration: 124,
         });
         expect(insterstitials.integrated).to.include({
           duration: 64,
@@ -1094,7 +1077,7 @@ fileSequence2.mp4
 #EXTINF:8.80880,	
 #EXT-X-BITRATE:1824
 fileSequence3.mp4
-#EXT-X-DATERANGE:ID="mid-30",CLASS="com.apple.hls.interstitial",START-DATE="2024-02-23T15:00:30.000Z",DURATION=16,X-ASSET-LIST="https://example.com/mid-list.m3u8"
+#EXT-X-DATERANGE:ID="mid-30",CLASS="com.apple.hls.interstitial",START-DATE="2024-02-23T15:00:30.000Z",DURATION=16,X-ASSET-LIST="https://example.com/mid-list.json"
 #EXTINF:9.70970,	
 #EXT-X-BITRATE:1768
 fileSequence4.mp4
@@ -1103,11 +1086,7 @@ fileSequence4.mp4
 fileSequence5.mp4`;
 
     it('should begin preroll on attach', function () {
-      const details = setLoadedLevelDetails(playlist);
-      hls.trigger(Events.LEVEL_UPDATED, {
-        details,
-        level: 0,
-      });
+      setLoadedLevelDetails(playlist);
       const insterstitials = interstitialsController.interstitialsManager;
       if (!insterstitials) {
         expect(insterstitials, 'interstitialsManager').to.be.an('object');
@@ -1115,52 +1094,52 @@ fileSequence5.mp4`;
       }
       expect(insterstitials.events).is.an('array').which.has.lengthOf(2);
       expect(insterstitials.schedule).is.an('array').which.has.lengthOf(4);
-      if (!insterstitials.events || !insterstitials.schedule) {
-        return;
-      }
       const callsWithPrerollBeforeAttach = getTriggerCalls();
       expect(callsWithPrerollBeforeAttach).to.deep.equal(
-        [
-          Events.LEVEL_UPDATED,
-          Events.INTERSTITIALS_UPDATED,
-          Events.INTERSTITIAL_ASSET_PLAYER_CREATED,
-          Events.INTERSTITIAL_STARTED,
-        ],
-        `Actual events before attach: ${callsWithPrerollBeforeAttach.join(', ')}`,
+        [Events.LEVEL_UPDATED, Events.INTERSTITIALS_UPDATED],
+        `Actual events before attach`,
       );
       hls.trigger.resetHistory();
-      expect(insterstitials.bufferingIndex).to.equal(0, 'bufferingIndex');
-      expect(insterstitials.playingIndex).to.equal(0, 'playingIndex');
-      const media = new MockMediaElement();
-      hls.attachMedia(media as unknown as HTMLMediaElement);
-      (hls as any).bufferController.media = media;
-      hls.trigger(Events.MEDIA_ATTACHED, {
-        media: media as unknown as HTMLMediaElement,
-        mediaSource: {} as any,
-      });
+      expect(insterstitials.bufferingIndex).to.equal(-1, 'bufferingIndex');
+      expect(insterstitials.playingIndex).to.equal(-1, 'playingIndex');
+      attachMediaToHls();
       const callsWithPrerollAfterAttach = getTriggerCalls();
       const expectedEvents = [
         Events.MEDIA_ATTACHING,
         Events.MEDIA_ATTACHED,
-        Events.INTERSTITIAL_ASSET_STARTED,
         Events.INTERSTITIALS_BUFFERED_TO_BOUNDARY,
+        Events.INTERSTITIAL_ASSET_PLAYER_CREATED,
+        Events.INTERSTITIAL_STARTED,
+        Events.INTERSTITIAL_ASSET_STARTED,
         Events.MEDIA_DETACHING,
       ];
       expect(callsWithPrerollAfterAttach).to.deep.equal(
         expectedEvents,
-        `Actual events after attach: ${callsWithPrerollAfterAttach.join(', ')}`,
+        `Actual events after attach`,
       );
       expect(insterstitials.bufferingIndex).to.equal(0, 'bufferingIndex');
       expect(insterstitials.playingIndex).to.equal(0, 'playingIndex');
+      expect(
+        insterstitials.interstitialPlayer,
+        `interstitialPlayer`,
+      ).to.include({
+        playingIndex: 0,
+        currentTime: 0,
+        duration: 37,
+      });
+      expect(
+        insterstitials.interstitialPlayer?.scheduleItem?.event,
+        `interstitialPlayer.scheduleItem`,
+      ).to.include({ identifier: 'pre' });
     });
 
-    it('should handle empty asset-lists', function () {
+    it('should handle empty asset-lists with resume offset', function () {
       const playlist = `#EXTM3U
 #EXT-X-TARGETDURATION:10
 #EXT-X-VERSION:7
 #EXT-X-MEDIA-SEQUENCE:1
 #EXT-X-PROGRAM-DATE-TIME:2024-02-23T15:00:00.000Z
-#EXT-X-DATERANGE:ID="start",CLASS="com.apple.hls.interstitial",START-DATE="2024-02-23T15:00:00.000Z",DURATION=5,X-ASSET-LIST="https://example.com/empty.m3u8",X-RESUME-OFFSET=5
+#EXT-X-DATERANGE:ID="start",CLASS="com.apple.hls.interstitial",START-DATE="2024-02-23T15:00:00.000Z",DURATION=5,X-ASSET-LIST="https://example.com/empty.json",X-RESUME-OFFSET=5
 #EXT-X-MAP:URI="fileSequence0.mp4"
 #EXTINF:5,	
 fileSequence1.mp4
@@ -1169,19 +1148,9 @@ fileSequence2.mp4
 #EXTINF:5,	
 fileSequence3.mp4
 #EXT-X-ENDLIST`;
-      const media = new MockMediaElement();
-      hls.attachMedia(media as unknown as HTMLMediaElement);
-      (hls as any).bufferController.media = media;
-      hls.trigger(Events.MEDIA_ATTACHED, {
-        media: media as unknown as HTMLMediaElement,
-        mediaSource: {} as any,
-      });
+      attachMediaToHls();
 
-      const details = setLoadedLevelDetails(playlist);
-      hls.trigger(Events.LEVEL_UPDATED, {
-        details,
-        level: 0,
-      });
+      setLoadedLevelDetails(playlist);
       const insterstitials = interstitialsController.interstitialsManager;
       if (!insterstitials) {
         expect(insterstitials, 'interstitialsManager').to.be.an('object');
@@ -1189,9 +1158,6 @@ fileSequence3.mp4
       }
       expect(insterstitials.events).is.an('array').which.has.lengthOf(1);
       expect(insterstitials.schedule).is.an('array').which.has.lengthOf(2);
-      if (!insterstitials.events || !insterstitials.schedule) {
-        return;
-      }
       const callsBeforeAttach = getTriggerCalls();
       expect(callsBeforeAttach).to.deep.equal(
         [
@@ -1199,15 +1165,16 @@ fileSequence3.mp4
           Events.MEDIA_ATTACHED,
           Events.LEVEL_UPDATED,
           Events.INTERSTITIALS_UPDATED,
-          Events.ASSET_LIST_LOADING,
           Events.INTERSTITIALS_BUFFERED_TO_BOUNDARY,
+          Events.ASSET_LIST_LOADING,
           Events.INTERSTITIAL_STARTED,
         ],
-        `Actual events before asset-list: ${callsBeforeAttach.join(', ')}`,
+        `Actual events before asset-list`,
       );
       hls.trigger.resetHistory();
-      expect(insterstitials.bufferingIndex).to.equal(0, 'bufferingIndex');
-      expect(insterstitials.playingIndex).to.equal(0, 'playingIndex');
+      expect(insterstitials.bufferingIndex).to.equal(0, 'bufferingIndex a');
+      expect(insterstitials.playingIndex).to.equal(0, 'playingIndex a');
+      expect(insterstitials.primary.currentTime).to.equal(0, 'timelinePos a');
 
       // Load empty asset-list
       const interstitial = insterstitials.events[0];
@@ -1221,14 +1188,858 @@ fileSequence3.mp4
       expect(callsAfterAttach).to.deep.equal(
         [
           Events.ASSET_LIST_LOADED,
+          Events.INTERSTITIALS_UPDATED,
           Events.INTERSTITIAL_ENDED,
           Events.INTERSTITIALS_BUFFERED_TO_BOUNDARY,
           Events.INTERSTITIALS_PRIMARY_RESUMED,
         ],
-        `Actual events after asset-list: ${callsAfterAttach.join(', ')}`,
+        `Actual events after asset-list`,
       );
-      expect(insterstitials.bufferingIndex).to.equal(1, 'bufferingIndex');
-      expect(insterstitials.playingIndex).to.equal(1, 'playingIndex');
+      expect(insterstitials.bufferingIndex).to.equal(1, 'bufferingIndex b');
+      expect(insterstitials.playingIndex).to.equal(1, 'playingIndex b');
+      expect(insterstitials.primary.currentTime).to.equal(5, 'timelinePos b');
+    });
+
+    it('should handle empty asset-lists without resume offset, ignoring date range tag duration', function () {
+      const playlist = `#EXTM3U
+#EXT-X-TARGETDURATION:10
+#EXT-X-VERSION:7
+#EXT-X-MEDIA-SEQUENCE:1
+#EXT-X-PROGRAM-DATE-TIME:2024-02-23T15:00:00.000Z
+#EXT-X-DATERANGE:ID="start",CLASS="com.apple.hls.interstitial",START-DATE="2024-02-23T15:00:00.000Z",DURATION=5,X-ASSET-LIST="https://example.com/empty.json"
+#EXT-X-MAP:URI="fileSequence0.mp4"
+#EXTINF:5,
+fileSequence1.mp4
+#EXTINF:5,
+fileSequence2.mp4
+#EXTINF:5,
+fileSequence3.mp4
+#EXT-X-ENDLIST`;
+      attachMediaToHls();
+
+      setLoadedLevelDetails(playlist);
+      const insterstitials = interstitialsController.interstitialsManager;
+      if (!insterstitials) {
+        expect(insterstitials, 'interstitialsManager').to.be.an('object');
+        return;
+      }
+      expect(insterstitials.events).is.an('array').which.has.lengthOf(1);
+      expect(insterstitials.schedule).is.an('array').which.has.lengthOf(2);
+      const callsBeforeAttach = getTriggerCalls();
+      expect(callsBeforeAttach).to.deep.equal(
+        [
+          Events.MEDIA_ATTACHING,
+          Events.MEDIA_ATTACHED,
+          Events.LEVEL_UPDATED,
+          Events.INTERSTITIALS_UPDATED,
+          Events.INTERSTITIALS_BUFFERED_TO_BOUNDARY,
+          Events.ASSET_LIST_LOADING,
+          Events.INTERSTITIAL_STARTED,
+        ],
+        `Actual events before asset-list`,
+      );
+      hls.trigger.resetHistory();
+      expect(insterstitials.bufferingIndex).to.equal(0, 'bufferingIndex a');
+      expect(insterstitials.playingIndex).to.equal(0, 'playingIndex a');
+      expect(insterstitials.primary.currentTime).to.equal(0, 'timelinePos a');
+
+      // Load empty asset-list
+      const interstitial = insterstitials.events[0];
+      interstitial.assetListResponse = { ASSETS: [] };
+      hls.trigger(Events.ASSET_LIST_LOADED, {
+        event: interstitial,
+        assetListResponse: interstitial.assetListResponse,
+        networkDetails: {},
+      });
+      const callsAfterAttach = getTriggerCalls();
+      expect(callsAfterAttach).to.deep.equal(
+        [
+          Events.ASSET_LIST_LOADED,
+          Events.INTERSTITIALS_UPDATED,
+          Events.INTERSTITIAL_ENDED,
+          Events.INTERSTITIALS_BUFFERED_TO_BOUNDARY,
+          Events.INTERSTITIALS_PRIMARY_RESUMED,
+        ],
+        `Actual events after asset-list`,
+      );
+      expect(insterstitials.bufferingIndex).to.equal(1, 'bufferingIndex b');
+      expect(insterstitials.playingIndex).to.equal(1, 'playingIndex b');
+      expect(insterstitials.primary.currentTime).to.equal(
+        0,
+        'playback should resume primary at 0 because no interstitial played',
+      );
+    });
+
+    it('should resume at start plus resumption-offset (start + duration and attach after level updated)', function () {
+      const playlist = `#EXTM3U
+#EXT-X-TARGETDURATION:10
+#EXT-X-VERSION:7
+#EXT-X-MEDIA-SEQUENCE:1
+#EXT-X-PROGRAM-DATE-TIME:2024-02-23T15:00:00.000Z
+#EXT-X-MAP:URI="fileSequence0.mp4"
+#EXTINF:10,	
+fileSequence1.mp4
+#EXTINF:10,	
+fileSequence2.mp4
+#EXTINF:10,	
+fileSequence3.mp4
+#EXT-X-DATERANGE:ID="mid-10",CLASS="com.apple.hls.interstitial",START-DATE="2024-02-23T15:00:30.000Z",DURATION=10,X-ASSET-LIST="https://example.com/mid.json"
+#EXTINF:10,	
+fileSequence4.mp4
+#EXTINF:10,	
+fileSequence5.mp4
+#EXTINF:10,	
+fileSequence6.mp4`;
+
+      // Loaded playlist (before attaching media)
+      setLoadedLevelDetails(playlist);
+      const insterstitials = interstitialsController.interstitialsManager;
+      if (!insterstitials) {
+        expect(insterstitials, 'interstitialsManager').to.be.an('object');
+        return;
+      }
+      expect(insterstitials.events).is.an('array').which.has.lengthOf(1);
+      expect(insterstitials.schedule).is.an('array').which.has.lengthOf(3);
+      const eventsBeforeAttach = getTriggerCalls();
+      expect(eventsBeforeAttach).to.deep.equal(
+        [Events.LEVEL_UPDATED, Events.INTERSTITIALS_UPDATED],
+        `Actual events before attach`,
+      );
+      expect(insterstitials.bufferingIndex).to.equal(-1, 'bufferingIndex');
+      expect(insterstitials.playingIndex).to.equal(-1, 'playingIndex');
+      expect(insterstitials.primary.currentTime).to.equal(0, 'timelinePos');
+
+      // Attach media
+      hls.trigger.resetHistory();
+      attachMediaToHls();
+      const eventsAfterAttach = getTriggerCalls();
+      const expectedEvents = [
+        Events.MEDIA_ATTACHING,
+        Events.MEDIA_ATTACHED,
+        Events.INTERSTITIALS_BUFFERED_TO_BOUNDARY,
+        Events.ASSET_LIST_LOADING,
+        Events.INTERSTITIAL_STARTED,
+      ];
+      expect(eventsAfterAttach).to.deep.equal(
+        expectedEvents,
+        `Actual events after attach`,
+      );
+      expect(insterstitials.bufferingIndex).to.equal(1, 'bufferingIndex a');
+      expect(insterstitials.playingIndex).to.equal(1, 'playingIndex a');
+      expect(insterstitials.primary.currentTime).to.equal(30, 'timelinePos a');
+
+      // Load asset-list
+      hls.trigger.resetHistory();
+      const interstitial = insterstitials.events[0];
+      interstitial.assetListResponse = {
+        ASSETS: [{ URI: '', DURATION: '10' }],
+      };
+      hls.trigger(Events.ASSET_LIST_LOADED, {
+        event: interstitial,
+        assetListResponse: interstitial.assetListResponse,
+        networkDetails: {},
+      });
+      const callsAfterAttach = getTriggerCalls();
+      expect(callsAfterAttach).to.deep.equal(
+        [
+          Events.ASSET_LIST_LOADED,
+          Events.INTERSTITIAL_ASSET_PLAYER_CREATED,
+          Events.INTERSTITIAL_ASSET_STARTED,
+          Events.MEDIA_DETACHING,
+        ],
+        `Actual events after asset-list`,
+      );
+
+      // skip to end of interstitial
+      hls.trigger.resetHistory();
+      insterstitials.skip();
+      const eventsAfterSkip = getTriggerCalls();
+      const expectedSkipEvents = [
+        Events.INTERSTITIAL_ASSET_ENDED,
+        Events.INTERSTITIAL_ENDED,
+        Events.INTERSTITIALS_BUFFERED_TO_BOUNDARY,
+      ].concat(
+        interstitial.appendInPlace
+          ? [Events.INTERSTITIALS_PRIMARY_RESUMED]
+          : [Events.MEDIA_ATTACHING, Events.INTERSTITIALS_PRIMARY_RESUMED],
+      );
+      expect(eventsAfterSkip).to.deep.equal(
+        expectedSkipEvents,
+        `Actual events after skip`,
+      );
+      expect(insterstitials.bufferingIndex).to.equal(2, 'bufferingIndex b');
+      expect(insterstitials.playingIndex).to.equal(2, 'playingIndex b');
+      expect(insterstitials.primary.currentTime).to.equal(
+        interstitial.appendInPlace ? 40.001 : 40,
+        'timelinePos b',
+      );
+    });
+
+    it('should resume at start plus resumption-offset (start + duration w/ CUE="ONCE" and attach on start)', function () {
+      const playlist = `#EXTM3U
+#EXT-X-TARGETDURATION:10
+#EXT-X-VERSION:7
+#EXT-X-MEDIA-SEQUENCE:1
+#EXT-X-PROGRAM-DATE-TIME:2024-02-23T15:00:00.000Z
+#EXT-X-MAP:URI="fileSequence0.mp4"
+#EXTINF:10,	
+fileSequence1.mp4
+#EXTINF:10,	
+fileSequence2.mp4
+#EXTINF:10,	
+fileSequence3.mp4
+#EXT-X-DATERANGE:ID="mid-10",CLASS="com.apple.hls.interstitial",START-DATE="2024-02-23T15:00:30.000Z",DURATION=10,X-ASSET-LIST="https://example.com/mid.json",CUE="ONCE"
+#EXTINF:10,	
+fileSequence4.mp4
+#EXTINF:10,	
+fileSequence5.mp4
+#EXTINF:10,	
+fileSequence6.mp4`;
+
+      // Attach media
+      attachMediaToHls();
+      expect(
+        interstitialsController.interstitialsManager,
+        'interstitialsManager before level updated',
+      )
+        .to.deep.include({
+          events: [],
+          schedule: [],
+          playerQueue: [],
+        })
+        .which.has.property('primary')
+        .which.includes({ bufferedEnd: 0, currentTime: 0, duration: 0 });
+
+      const eventsAfterAttach = getTriggerCalls();
+      const expectedEvents = [Events.MEDIA_ATTACHING, Events.MEDIA_ATTACHED];
+      expect(eventsAfterAttach).to.deep.equal(
+        expectedEvents,
+        `Actual events after attach`,
+      );
+
+      // Loaded playlist
+      hls.trigger.resetHistory();
+      setLoadedLevelDetails(playlist);
+      const insterstitials = interstitialsController.interstitialsManager;
+      if (!insterstitials) {
+        expect(insterstitials, 'interstitialsManager').to.be.an('object');
+        return;
+      }
+      expect(insterstitials.events).is.an('array').which.has.lengthOf(1);
+      expect(insterstitials.schedule).is.an('array').which.has.lengthOf(3);
+      const eventsAfterPlaylist = getTriggerCalls();
+      expect(eventsAfterPlaylist).to.deep.equal(
+        [
+          Events.LEVEL_UPDATED,
+          Events.INTERSTITIALS_UPDATED,
+          Events.INTERSTITIALS_BUFFERED_TO_BOUNDARY,
+          Events.ASSET_LIST_LOADING,
+          Events.INTERSTITIAL_STARTED,
+        ],
+        `Actual events before attach`,
+      );
+      expect(insterstitials.bufferingIndex).to.equal(1, 'bufferingIndex a');
+      expect(insterstitials.playingIndex).to.equal(1, 'playingIndex a');
+      expect(insterstitials.primary.currentTime).to.equal(30, 'timelinePos a');
+
+      // Load asset-list
+      hls.trigger.resetHistory();
+      const interstitial = insterstitials.events[0];
+      interstitial.assetListResponse = {
+        ASSETS: [{ URI: '', DURATION: '10' }],
+      };
+      hls.trigger(Events.ASSET_LIST_LOADED, {
+        event: interstitial,
+        assetListResponse: interstitial.assetListResponse,
+        networkDetails: {},
+      });
+      const callsAfterAttach = getTriggerCalls();
+      expect(callsAfterAttach).to.deep.equal(
+        [
+          Events.ASSET_LIST_LOADED,
+          Events.INTERSTITIAL_ASSET_PLAYER_CREATED,
+          Events.INTERSTITIAL_ASSET_STARTED,
+          Events.MEDIA_DETACHING,
+        ],
+        `Actual events after asset-list`,
+      );
+
+      // skip to end of interstitial
+      hls.trigger.resetHistory();
+      insterstitials.skip();
+      const eventsAfterSkip = getTriggerCalls();
+      const expectedSkipEvents = [
+        Events.INTERSTITIAL_ASSET_ENDED,
+        Events.INTERSTITIAL_ENDED,
+        Events.INTERSTITIALS_UPDATED, // removed Interstitial with CUE="ONCE"
+        Events.INTERSTITIALS_BUFFERED_TO_BOUNDARY,
+        Events.MEDIA_ATTACHING,
+        Events.INTERSTITIALS_PRIMARY_RESUMED,
+      ];
+      expect(eventsAfterSkip).to.deep.equal(
+        expectedSkipEvents,
+        `Actual events after skip`,
+      );
+      // Removing the CUE="ONCE" interstitial changes the `schedule` items, but does not remove it from `events`
+      expect(insterstitials.events).is.an('array').which.has.lengthOf(1);
+      expect(insterstitials.schedule).is.an('array').which.has.lengthOf(1);
+      expect(insterstitials.bufferingIndex).to.equal(0, 'bufferingIndex b');
+      expect(insterstitials.playingIndex).to.equal(0, 'playingIndex b');
+      expect(insterstitials.primary.currentTime).to.equal(40, 'timelinePos b');
+    });
+
+    it('should report correct playhead position in event callbacks between items and assets', function () {
+      const playlist = `#EXTM3U
+#EXT-X-TARGETDURATION:10
+#EXT-X-VERSION:7
+#EXT-X-MEDIA-SEQUENCE:1
+#EXT-X-PROGRAM-DATE-TIME:2024-02-23T15:00:00.000Z
+#EXT-X-MAP:URI="fileSequence0.mp4"
+#EXTINF:10,	
+fileSequence1.mp4
+#EXTINF:10,	
+fileSequence2.mp4
+#EXTINF:10,	
+fileSequence3.mp4
+#EXT-X-DATERANGE:ID="mid-10",CLASS="com.apple.hls.interstitial",START-DATE="2024-02-23T15:00:30.000Z",DURATION=15,X-RESUME-OFFSET=10,X-TIMELINE-OCCUPIES=RANGE,X-ASSET-LIST="https://example.com/mid.json"
+#EXTINF:10,	
+fileSequence4.mp4
+#EXTINF:10,	
+fileSequence5.mp4
+#EXTINF:10,	
+fileSequence6.mp4
+#EXT-X-ENDLIST`;
+
+      const im = interstitialsController.interstitialsManager;
+      if (!im) {
+        expect(im, 'interstitialsManager').to.be.an('object');
+        return;
+      }
+      const primary = 'primary';
+      const integrated = 'integrated';
+      const interstitialPlayer = 'interstitialPlayer';
+      const expectIm = (property: string, context: string) =>
+        expect(im[property], `interstitialsManager.${property} @${context}`);
+      const expectAssetPlayer = (assetListIndex: number, context: string) => {
+        const assetPlayersPath =
+          'interstitialsManager.interstitialPlayer.assetPlayers';
+        expectIm(interstitialPlayer, context)
+          .to.have.property('assetPlayers')
+          .which.is.an('array')
+          .that.has.lengthOf.above(assetListIndex, assetPlayersPath);
+        return expect(
+          im.interstitialPlayer?.assetPlayers[assetListIndex],
+          `${assetPlayersPath}[${assetListIndex}] @${context}`,
+        ).to.be.an('object');
+      };
+      const logIm = (context: string) =>
+        hls.logger.info(
+          `primary.currentTime ${im.primary.currentTime | 0} intg.currentTime ${im.integrated.currentTime | 0} pi: ${im.playingIndex} bi: ${im.bufferingIndex} @${context}`,
+        );
+
+      hls.on(Events.INTERSTITIALS_UPDATED, (t) => {
+        logIm(t);
+        expectIm(primary, t).to.include({ currentTime: 0, bufferedEnd: 0 });
+        expectIm(integrated, t).to.include({ currentTime: 0, bufferedEnd: 0 });
+        expectIm(interstitialPlayer, t).to.be.null;
+      });
+      hls.on(Events.INTERSTITIALS_BUFFERED_TO_BOUNDARY, (t, data) => {
+        const bufferingIndex = data.bufferingIndex;
+        const e = `${t}_${bufferingIndex}`;
+        logIm(e);
+        if (bufferingIndex === 0) {
+          // buffered to primary
+          expectIm(primary, e).to.include({ currentTime: 0, bufferedEnd: 0 });
+          expectIm(integrated, e).to.include({
+            currentTime: 0,
+            bufferedEnd: 0,
+          });
+          expectIm(interstitialPlayer, e).to.be.null;
+        } else if (bufferingIndex === 1) {
+          // buffered to interstitial
+          expectIm(primary, e).to.include({ currentTime: 30, bufferedEnd: 30 });
+          expectIm(integrated, e).to.include({
+            currentTime: 30,
+            bufferedEnd: 30,
+          });
+          expectIm(interstitialPlayer, e).to.include({
+            playingIndex: -1,
+            currentTime: 0,
+            duration: 15,
+          });
+        } else if (bufferingIndex === 2) {
+          // buffered to primary (interstitial ended)
+          expectIm(primary, e).to.include({ currentTime: 40, bufferedEnd: 40 });
+          expectIm(integrated, e).to.include({
+            currentTime: 45,
+            bufferedEnd: 45,
+          });
+          expectIm(interstitialPlayer, e).to.be.null;
+        }
+      });
+      hls.on(Events.INTERSTITIAL_STARTED, (t) => {
+        logIm(t);
+        expectIm(primary, t).to.include({ currentTime: 30, bufferedEnd: 30 });
+        expectIm(integrated, t).to.include({
+          currentTime: 30,
+          bufferedEnd: 30,
+        });
+        expectIm(interstitialPlayer, t).to.not.be.null;
+        expect(im.interstitialPlayer?.assetPlayers).to.have.lengthOf(0);
+        expectIm(interstitialPlayer, t).to.include({
+          playingIndex: -1,
+          currentTime: 0,
+          duration: 15,
+        });
+      });
+      hls.on(Events.ASSET_LIST_LOADED, (t) => {
+        logIm(t);
+        expectIm(primary, t).to.include({ currentTime: 30, bufferedEnd: 30 });
+        expectIm(integrated, t).to.include({
+          currentTime: 30,
+          bufferedEnd: 30,
+        });
+        expectIm(interstitialPlayer, t).to.not.be.null;
+        expect(im.interstitialPlayer?.assetPlayers).to.have.lengthOf(3);
+        expectIm(interstitialPlayer, t).to.include({
+          playingIndex: 0,
+          currentTime: 0,
+          duration: 15,
+        });
+      });
+      hls.on(Events.INTERSTITIAL_ASSET_PLAYER_CREATED, (t, data) => {
+        const assetListIndex = data.assetListIndex;
+        const e = `${t}_${assetListIndex}`;
+        logIm(e);
+        expectIm(primary, e).to.include({ currentTime: 30 });
+        expectIm(integrated, e).to.include({ currentTime: 30 });
+        expectIm(interstitialPlayer, e).to.not.be.null;
+        expectAssetPlayer(assetListIndex, e).to.include({
+          currentTime: 0,
+          bufferedEnd: 0,
+          duration: 5,
+          interstitialId: 'mid-10',
+          startOffset: assetListIndex * 5,
+          destroyed: false,
+        });
+      });
+      hls.on(Events.INTERSTITIAL_ASSET_STARTED, (t, data) => {
+        const assetListIndex = data.assetListIndex;
+        const e = `${t}_${assetListIndex}`;
+        logIm(e);
+        if (assetListIndex === 0) {
+          expectIm(primary, e).to.include({ currentTime: 30, bufferedEnd: 30 });
+          expectIm(integrated, e).to.include({
+            currentTime: 30,
+            bufferedEnd: 30,
+          });
+        } else if (assetListIndex === 1) {
+          expectIm(primary, e).to.include({ currentTime: 30, bufferedEnd: 30 });
+          expectIm(integrated, e).to.include({
+            currentTime: 35,
+            bufferedEnd: 35,
+          });
+        } else if (assetListIndex === 2) {
+          expectIm(primary, e).to.include({ currentTime: 30, bufferedEnd: 30 });
+          expectIm(integrated, e).to.include({
+            currentTime: 40,
+            bufferedEnd: 40,
+          });
+        }
+        expectIm(interstitialPlayer, e).to.not.be.null;
+        expectIm(interstitialPlayer, e).to.include({
+          playingIndex: assetListIndex,
+          currentTime: assetListIndex * 5,
+          duration: 15,
+        });
+        expectAssetPlayer(assetListIndex, e).to.include({
+          currentTime: 0,
+          bufferedEnd: 0,
+          duration: 5,
+          interstitialId: 'mid-10',
+          startOffset: assetListIndex * 5,
+          destroyed: false,
+        });
+      });
+      hls.on(Events.INTERSTITIAL_ASSET_ENDED, (t, data) => {
+        const assetListIndex = data.assetListIndex;
+        const e = `${t}_${assetListIndex}`;
+        logIm(e);
+        if (assetListIndex === 0) {
+          expectIm(primary, e).to.include({ currentTime: 30, bufferedEnd: 30 });
+          expectIm(integrated, e).to.include({
+            currentTime: 35,
+            bufferedEnd: 35,
+          });
+        } else if (assetListIndex === 1) {
+          expectIm(primary, e).to.include({ currentTime: 30, bufferedEnd: 30 });
+          expectIm(integrated, e).to.include({
+            currentTime: 40,
+            bufferedEnd: 40,
+          });
+        } else if (assetListIndex === 2) {
+          expectIm(primary, e).to.include({ currentTime: 40, bufferedEnd: 40 });
+          expectIm(integrated, e).to.include({
+            currentTime: 45,
+            bufferedEnd: 45,
+          });
+        }
+        expectIm(interstitialPlayer, t).to.not.be.null;
+        expectIm(interstitialPlayer, t).to.include({
+          playingIndex: assetListIndex,
+          currentTime: 5 + assetListIndex * 5,
+          duration: 15,
+        });
+        expectAssetPlayer(assetListIndex, t).to.include({
+          currentTime: 5,
+          bufferedEnd: 5,
+          duration: 5,
+          interstitialId: 'mid-10',
+          startOffset: assetListIndex * 5,
+          destroyed: false,
+        });
+      });
+      hls.on(Events.INTERSTITIAL_ENDED, (t) => {
+        logIm(t);
+        expectIm(primary, t).to.include({ currentTime: 40, bufferedEnd: 40 });
+        expectIm(integrated, t).to.include({
+          currentTime: 45,
+          bufferedEnd: 45,
+        });
+        expectIm(interstitialPlayer, t).to.not.be.null;
+      });
+      hls.on(Events.INTERSTITIALS_PRIMARY_RESUMED, (t) => {
+        logIm(t);
+        expectIm(primary, t).to.include({ currentTime: 40, bufferedEnd: 40 });
+        expectIm(integrated, t).to.include({
+          currentTime: 45,
+          bufferedEnd: 45,
+        });
+        expectIm(interstitialPlayer, t).to.be.null;
+      });
+      hls.on(Events.MEDIA_ATTACHING, (t) => {
+        const playingIndex = im.playingIndex;
+        logIm(`${t} playingIndex ${playingIndex}`);
+        if (playingIndex < 2) {
+          expectIm(primary, t).to.include({ currentTime: 0, bufferedEnd: 0 });
+          expectIm(integrated, t).to.include({
+            currentTime: 0,
+            bufferedEnd: 0,
+          });
+          expectIm(interstitialPlayer, t).to.be.null;
+        } else {
+          expectIm(primary, t).to.include({ currentTime: 40, bufferedEnd: 40 });
+          expectIm(integrated, t).to.include({
+            currentTime: 45,
+            bufferedEnd: 45,
+          });
+          expectIm(interstitialPlayer, t).to.be.null;
+        }
+      });
+      hls.on(Events.MEDIA_ATTACHED, (t) => {
+        logIm(t);
+        expectIm(primary, t).to.include({ currentTime: 0, bufferedEnd: 0 });
+        expectIm(integrated, t).to.include({ currentTime: 0, bufferedEnd: 0 });
+        expectIm(interstitialPlayer, t).to.be.null;
+      });
+      hls.once(Events.MEDIA_DETACHING, (t) => {
+        logIm(t);
+        expectIm(primary, t).to.include({ currentTime: 30, bufferedEnd: 30 });
+        expectIm(integrated, t).to.include({
+          currentTime: 30,
+          bufferedEnd: 30,
+        });
+      });
+
+      // Loaded playlist (before attaching media)
+      setLoadedLevelDetails(playlist);
+
+      expect(im.events).is.an('array').which.has.lengthOf(1);
+      expect(im.schedule).is.an('array').which.has.lengthOf(3);
+      const eventsBeforeAttach = getTriggerCalls();
+      expect(eventsBeforeAttach).to.deep.equal(
+        [Events.LEVEL_UPDATED, Events.INTERSTITIALS_UPDATED],
+        `Actual events before attach`,
+      );
+      expect(im.bufferingIndex).to.equal(-1, 'bufferingIndex');
+      expect(im.playingIndex).to.equal(-1, 'playingIndex');
+      expectIm(primary, 'before attach').to.include({
+        currentTime: 0,
+        bufferedEnd: 0,
+      });
+      expectIm(integrated, 'before attach').to.include({
+        currentTime: 0,
+        bufferedEnd: 0,
+      });
+
+      // Attach media
+      hls.trigger.resetHistory();
+      const media = attachMediaToHls();
+      media.__timeUpdate(10);
+      logIm('timeupdate-10');
+      expectIm(primary, 'media@10').to.include({
+        currentTime: 10,
+        bufferedEnd: 10,
+      });
+      expectIm(integrated, 'media@10').to.include({
+        currentTime: 10,
+        bufferedEnd: 10,
+      });
+      const eventsAfterAttach = getTriggerCalls();
+      const expectedEvents = [
+        Events.MEDIA_ATTACHING,
+        Events.MEDIA_ATTACHED,
+        Events.INTERSTITIALS_BUFFERED_TO_BOUNDARY,
+      ];
+      expect(eventsAfterAttach).to.deep.equal(
+        expectedEvents,
+        `Actual events after attach`,
+      );
+      // Advance to interstitial
+      hls.trigger.resetHistory();
+      media.__timeUpdate(30);
+      logIm('timeupdate-30');
+
+      const eventsAfterPlayback = getTriggerCalls();
+      const expectedEventsAfterPlayback = [
+        Events.INTERSTITIALS_BUFFERED_TO_BOUNDARY,
+        Events.ASSET_LIST_LOADING,
+        Events.INTERSTITIAL_STARTED,
+      ];
+      expect(eventsAfterPlayback).to.deep.equal(
+        expectedEventsAfterPlayback,
+        `Actual events after playback to interstitial`,
+      );
+      expect(im.bufferingIndex).to.equal(1, 'bufferingIndex a');
+      expect(im.playingIndex).to.equal(1, 'playingIndex a');
+      expectIm(primary, 'media@30').to.include({ currentTime: 30 });
+      expectIm(integrated, 'media@30').to.include({ currentTime: 30 });
+
+      // Load asset-list
+      hls.trigger.resetHistory();
+      const interstitial = im.events[0];
+      interstitial.assetListResponse = {
+        ASSETS: [
+          { URI: 'http://example.com/a.m3u8', DURATION: '5' },
+          { URI: 'http://example.com/b.m3u8', DURATION: '5' },
+          { URI: 'http://example.com/c.m3u8', DURATION: '5' },
+        ],
+      };
+      hls.trigger(Events.ASSET_LIST_LOADED, {
+        event: interstitial,
+        assetListResponse: interstitial.assetListResponse,
+        networkDetails: {},
+      });
+      const callsAfterAssetsLoaded = getTriggerCalls();
+      expect(callsAfterAssetsLoaded).to.deep.equal(
+        [
+          Events.ASSET_LIST_LOADED,
+          Events.INTERSTITIAL_ASSET_PLAYER_CREATED,
+          Events.INTERSTITIAL_ASSET_PLAYER_CREATED,
+          Events.INTERSTITIAL_ASSET_PLAYER_CREATED,
+          Events.INTERSTITIAL_ASSET_STARTED,
+          Events.MEDIA_DETACHING,
+        ],
+        `Actual events after asset-list`,
+      );
+      expect(im.interstitialPlayer, `interstitialPlayer`).to.not.be.null;
+
+      // Advance assets
+      const advanceAsset = (
+        sequence: string,
+        assetIndex: number,
+        integratedTimePlusThree: number,
+      ) => {
+        hls.trigger.resetHistory();
+
+        media.__timeUpdate(media.currentTime + 3);
+        logIm(`${sequence} asset@3`);
+        expectIm(primary, `${sequence} asset@3`).to.include({
+          currentTime: 30,
+        });
+        expectIm(integrated, `${sequence} asset@3`).to.include({
+          currentTime: integratedTimePlusThree,
+        });
+        expectIm(
+          interstitialPlayer,
+          `interstitialPlayer ${sequence} asset@3`,
+        ).to.include({
+          playingIndex: assetIndex,
+          currentTime: integratedTimePlusThree - 30,
+          duration: 15,
+        });
+        media.__timeUpdate(media.currentTime + 2);
+        const assetPlayerHls =
+          im.interstitialPlayer?.assetPlayers[assetIndex]?.hls;
+        expect(assetPlayerHls, 'asset player is defined').to.not.be.null;
+        // end asset playback
+        assetPlayerHls?.trigger(Events.MEDIA_ENDED, {
+          stalled: false,
+        });
+        const eventsBetweenAssets = getTriggerCalls();
+        const expectedEventsBetweensAssets = [
+          Events.INTERSTITIAL_ASSET_ENDED,
+          Events.INTERSTITIAL_ASSET_STARTED,
+        ];
+        expect(eventsBetweenAssets).to.deep.equal(
+          expectedEventsBetweensAssets,
+          `Actual events after ${sequence} asset`,
+        );
+      };
+      // To second asset
+      advanceAsset('first', 0, 33);
+      // To third asset
+      advanceAsset('second', 1, 38);
+
+      // Advance to primary
+      hls.trigger.resetHistory();
+
+      media.__timeUpdate(media.currentTime + 5);
+      expectIm(primary, `third asset@5`).to.include({ currentTime: 30 });
+      expectIm(integrated, `third asset@5`).to.include({ currentTime: 45 });
+      expectIm(
+        interstitialPlayer,
+        `interstitialPlayer third asset@5`,
+      ).to.include({ playingIndex: 2, currentTime: 15, duration: 15 });
+
+      const assetPlayerHls = im.interstitialPlayer?.assetPlayers[2]?.hls;
+      expect(assetPlayerHls, 'last asset player is defined').to.not.be.null;
+      // end last asset playback
+      assetPlayerHls?.trigger(Events.MEDIA_ENDED, {
+        stalled: false,
+      });
+      const eventsAfterLastAsset = getTriggerCalls();
+      const expectedEndLastAssetEvents = [
+        Events.INTERSTITIAL_ASSET_ENDED,
+        Events.INTERSTITIAL_ENDED,
+        Events.INTERSTITIALS_BUFFERED_TO_BOUNDARY,
+        Events.MEDIA_ATTACHING,
+        Events.INTERSTITIALS_PRIMARY_RESUMED,
+      ];
+      expect(eventsAfterLastAsset).to.deep.equal(
+        expectedEndLastAssetEvents,
+        `Actual events after last asset`,
+      );
+      expect(im.bufferingIndex).to.equal(2, 'bufferingIndex after skip');
+      expect(im.playingIndex).to.equal(2, 'playingIndex after skip');
+      expectIm(primary, `after break`).to.include({ currentTime: 40 });
+      expectIm(integrated, `after break`).to.include({ currentTime: 45 });
+      media.__timeUpdate(50);
+      expectIm(primary, `media@50`).to.include({ currentTime: 50 });
+      expectIm(integrated, `media@50`).to.include({ currentTime: 55 });
+      logIm('timeupdate-50');
+    });
+  });
+
+  describe('Live start', function () {
+    it('request asset-list with _HLS_start_offset when joining', function () {
+      const playlist = `#EXTM3U
+#EXT-X-TARGETDURATION:10
+#EXT-X-VERSION:7
+#EXT-X-MEDIA-SEQUENCE:1
+#EXT-X-PROGRAM-DATE-TIME:2024-02-23T15:00:00.000Z
+#EXT-X-MAP:URI="fileSequence0.mp4"
+#EXTINF:10,	
+fileSequence1.mp4
+#EXTINF:10,	
+fileSequence2.mp4
+#EXT-X-DATERANGE:ID="mid-live",CLASS="com.apple.hls.interstitial",START-DATE="2024-02-23T15:00:20.000Z",DURATION=30,X-ASSET-LIST="https://example.com/mid.json"
+#EXTINF:10,	
+fileSequence3.mp4
+#EXTINF:10,	
+fileSequence4.mp4
+#EXTINF:10,	
+fileSequence5.mp4
+#EXTINF:10,	
+fileSequence6.mp4`;
+
+      // Loaded playlist (before attaching media)
+      setLoadedLevelDetails(playlist);
+      const insterstitials = interstitialsController.interstitialsManager;
+      if (!insterstitials) {
+        expect(insterstitials, 'interstitialsManager').to.be.an('object');
+        return;
+      }
+      expect(insterstitials.events).is.an('array').which.has.lengthOf(1);
+      expect(insterstitials.schedule).is.an('array').which.has.lengthOf(3);
+
+      // Capture asset-list request
+      const loadSpy = sandbox.spy(hls.config.loader.prototype, 'load');
+      const primaryId = hls.sessionId;
+
+      // Attach media
+      hls.trigger.resetHistory();
+      attachMediaToHls();
+      const eventsAfterAttach = getTriggerCalls();
+      const expectedEvents = [
+        Events.MEDIA_ATTACHING,
+        Events.MEDIA_ATTACHED,
+        Events.INTERSTITIALS_BUFFERED_TO_BOUNDARY,
+        Events.ASSET_LIST_LOADING,
+        Events.INTERSTITIAL_STARTED,
+      ];
+      expect(loadSpy).calledOnce;
+      const assetListUrl = loadSpy.getCalls()[0].args[0].url;
+      expect(
+        assetListUrl,
+        '_HLS_primary_id and _HLS_start_offset match',
+      ).to.equal(
+        `https://example.com/mid.json?_HLS_primary_id=${primaryId}&_HLS_start_offset=10`,
+      );
+      expect(eventsAfterAttach).to.deep.equal(
+        expectedEvents,
+        `Actual events after attach`,
+      );
+      expect(insterstitials.bufferingIndex).to.equal(1, 'bufferingIndex a');
+      expect(insterstitials.playingIndex).to.equal(1, 'playingIndex a');
+      expect(insterstitials.primary.currentTime).to.equal(30, 'timelinePos a');
+
+      // Load asset-list
+      hls.trigger.resetHistory();
+      const interstitial = insterstitials.events[0];
+      interstitial.assetListResponse = {
+        ASSETS: [{ URI: 'https://example.com/midroll.m3u8', DURATION: '30' }],
+      };
+      hls.trigger(Events.ASSET_LIST_LOADED, {
+        event: interstitial,
+        assetListResponse: interstitial.assetListResponse,
+        networkDetails: {},
+      });
+      const eventsAfterAssetListLoaded = getTriggerCalls();
+      expect(eventsAfterAssetListLoaded).to.deep.equal(
+        [
+          Events.ASSET_LIST_LOADED,
+          Events.INTERSTITIAL_ASSET_PLAYER_CREATED,
+          Events.INTERSTITIAL_ASSET_STARTED,
+          Events.MEDIA_DETACHING,
+        ],
+        `Actual events after asset-list`,
+      );
+      expect(insterstitials.bufferingIndex).to.equal(1, 'bufferingIndex b');
+      expect(insterstitials.playingIndex).to.equal(1, 'playingIndex b');
+      expect(insterstitials.primary.currentTime).to.equal(30, 'timelinePos b');
+      expect(
+        insterstitials.interstitialPlayer,
+        `interstitialPlayer`,
+      ).to.include({
+        playingIndex: 0,
+        currentTime: 0,
+        duration: 30,
+      });
+      expect(
+        insterstitials.interstitialPlayer?.scheduleItem?.event,
+        `interstitialPlayer.scheduleItem`,
+      ).to.include({ identifier: 'mid-live' });
+      expect(
+        insterstitials.interstitialPlayer?.assetPlayers,
+        `interstitialPlayer.assetPlayers[]`,
+      ).to.have.lengthOf(1);
+      expect(
+        insterstitials.interstitialPlayer?.assetPlayers[0]?.hls?.url,
+        `interstitialPlayer.assetPlayers[0].hls.url`,
+      ).to.equal(
+        `https://example.com/midroll.m3u8?_HLS_primary_id=${primaryId}`,
+      );
     });
   });
 });

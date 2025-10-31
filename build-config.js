@@ -73,7 +73,7 @@ const buildConstants = (type, additional = {}) => ({
     __USE_MEDIA_CAPABILITIES__: JSON.stringify(
       type === BUILD_TYPE.full || addMediaCapabilitiesSupport,
     ),
-    __USE_INTERSTITALS__: JSON.stringify(
+    __USE_INTERSTITIALS__: JSON.stringify(
       type === BUILD_TYPE.full || addInterstitialSupport,
     ),
 
@@ -136,12 +136,12 @@ const babelTsWithPresetEnvTargets = ({ targets, stripConsole }) =>
     ],
     plugins: [
       [
-        '@babel/plugin-proposal-class-properties',
+        '@babel/plugin-transform-class-properties',
         {
           loose: true,
         },
       ],
-      '@babel/plugin-proposal-object-rest-spread',
+      '@babel/plugin-transform-object-rest-spread',
       {
         visitor: {
           CallExpression: function (espath) {
@@ -172,7 +172,7 @@ const babelTsWithPresetEnvTargets = ({ targets, stripConsole }) =>
         },
       },
       ['@babel/plugin-transform-object-assign'],
-      ['@babel/plugin-proposal-optional-chaining'],
+      ['@babel/plugin-transform-optional-chaining'],
 
       ...(stripConsole
         ? [

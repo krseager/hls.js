@@ -15,6 +15,7 @@ import { TimelineController } from './controller/timeline-controller';
 import Cues from './utils/cues';
 import FetchLoader, { fetchSupported } from './utils/fetch-loader';
 import { requestMediaKeySystemAccess } from './utils/mediakeys-helper';
+import { stringify } from './utils/safe-json-stringify';
 import XhrLoader from './utils/xhr-loader';
 import type { MediaKeySessionContext } from './controller/eme-controller';
 import type Hls from './hls';
@@ -121,6 +122,7 @@ export type EMEControllerConfig = {
   drmSystems: DRMSystemsConfiguration;
   drmSystemOptions: DRMSystemOptions;
   requestMediaKeySystemAccessFunc: MediaKeyFunc | null;
+  requireKeySystemAccessOnStart: boolean;
 };
 
 export interface FragmentLoaderConstructor {
@@ -218,6 +220,8 @@ export type StreamControllerConfig = {
   maxMaxBufferLength: number;
   startFragPrefetch: boolean;
   testBandwidth: boolean;
+  liveSyncMode?: 'edge' | 'buffered';
+  startOnSegmentBoundary: boolean;
 };
 
 export type GapControllerConfig = {
@@ -279,7 +283,9 @@ export type HlsConfig = {
   ignoreDevicePixelRatio: boolean;
   maxDevicePixelRatio: number;
   preferManagedMediaSource: boolean;
+  preserveManualLevelOnError: boolean;
   timelineOffset?: number;
+  ignorePlaylistParsingErrors: boolean;
   loader: { new (confg: HlsConfig): Loader<LoaderContext> };
   fLoader?: FragmentLoaderConstructor;
   pLoader?: PlaylistLoaderConstructor;
@@ -307,7 +313,7 @@ export type HlsConfig = {
   interstitialsController?: typeof InterstitialsController;
   // Option to disable internal playback handling of Interstitials (set to false to disable Interstitials playback without disabling parsing and schedule events)
   enableInterstitialPlayback: boolean;
-  // Option to disable appending Interstitals inline on same timeline and MediaSource as Primary media
+  // Option to disable appending Interstitials inline on same timeline and MediaSource as Primary media
   interstitialAppendInPlace: boolean;
   // How many seconds past the end of a live playlist to preload Interstitial assets
   interstitialLiveLookAhead: number;
@@ -369,6 +375,7 @@ export const hlsDefaultConfig: HlsConfig = {
   maxBufferLength: 30, // used by stream-controller
   backBufferLength: Infinity, // used by buffer-controller
   frontBufferFlushThreshold: Infinity,
+  startOnSegmentBoundary: false, // used by stream-controller
   maxBufferSize: 60 * 1000 * 1000, // used by stream-controller
   maxFragLookUpTolerance: 0.25, // used by stream-controller
   maxBufferHole: 0.1, // used by stream-controller and gap-controller
@@ -377,6 +384,7 @@ export const hlsDefaultConfig: HlsConfig = {
   nudgeOffset: 0.1, // used by gap-controller
   nudgeMaxRetry: 3, // used by gap-controller
   nudgeOnVideoHole: true, // used by gap-controller
+  liveSyncMode: 'edge', // used by stream-controller
   liveSyncDurationCount: 3, // used by latency-controller
   liveSyncOnStallIncrease: 1, // used by latency-controller
   liveMaxLatencyDurationCount: Infinity, // used by latency-controller
@@ -397,6 +405,7 @@ export const hlsDefaultConfig: HlsConfig = {
   fpsDroppedMonitoringPeriod: 5000, // used by fps-controller
   fpsDroppedMonitoringThreshold: 0.2, // used by fps-controller
   appendErrorMaxRetry: 3, // used by buffer-controller
+  ignorePlaylistParsingErrors: false,
   loader: XhrLoader,
   // loader: FetchLoader,
   fLoader: undefined, // used by fragment-loader
@@ -431,6 +440,7 @@ export const hlsDefaultConfig: HlsConfig = {
   requestMediaKeySystemAccessFunc: __USE_EME_DRM__
     ? requestMediaKeySystemAccess
     : null, // used by eme-controller
+  requireKeySystemAccessOnStart: false, // used by eme-controller
   testBandwidth: true,
   progressive: false,
   lowLatencyMode: true,
@@ -439,10 +449,11 @@ export const hlsDefaultConfig: HlsConfig = {
   enableEmsgMetadataCues: true,
   enableEmsgKLVMetadata: false,
   enableID3MetadataCues: true,
-  enableInterstitialPlayback: __USE_INTERSTITALS__,
+  enableInterstitialPlayback: __USE_INTERSTITIALS__,
   interstitialAppendInPlace: true,
   interstitialLiveLookAhead: 10,
   useMediaCapabilities: __USE_MEDIA_CAPABILITIES__,
+  preserveManualLevelOnError: false,
 
   certLoadPolicy: {
     default: defaultLoadPolicy,
@@ -532,7 +543,7 @@ export const hlsDefaultConfig: HlsConfig = {
       : defaultLoadPolicy,
   },
   interstitialAssetListLoadPolicy: {
-    default: __USE_INTERSTITALS__
+    default: __USE_INTERSTITIALS__
       ? {
           maxTimeToFirstByteMs: 10000,
           maxLoadTimeMs: 30000,
@@ -581,7 +592,7 @@ export const hlsDefaultConfig: HlsConfig = {
   contentSteeringController: __USE_CONTENT_STEERING__
     ? ContentSteeringController
     : undefined,
-  interstitialsController: __USE_INTERSTITALS__
+  interstitialsController: __USE_INTERSTITIALS__
     ? InterstitialsController
     : undefined,
 };
@@ -688,7 +699,7 @@ export function mergeConfig(
       logger.warn(
         `hls.js config: "${report.join(
           '", "',
-        )}" setting(s) are deprecated, use "${policyName}": ${JSON.stringify(
+        )}" setting(s) are deprecated, use "${policyName}": ${stringify(
           userConfig[policyName],
         )}`,
       );

@@ -62,7 +62,7 @@ type ScheduleUpdateCallback = (
 
 export class InterstitialsSchedule extends Logger {
   private onScheduleUpdate: ScheduleUpdateCallback;
-  private eventMap: Record<string, InterstitialEvent> = {};
+  private eventMap: Record<string, InterstitialEvent | undefined> = {};
   public events: InterstitialEvent[] | null = null;
   public items: InterstitialScheduleItem[] | null = null;
   public durations: InterstitialScheduleDurations = {
@@ -89,6 +89,22 @@ export class InterstitialsSchedule extends Logger {
       this.events.forEach((interstitial) => interstitial.reset());
     }
     this.events = this.items = null;
+  }
+
+  public resetErrorsInRange(start: number, end: number): number {
+    if (this.events) {
+      return this.events.reduce((count, interstitial) => {
+        if (
+          start <= interstitial.startOffset &&
+          end > interstitial.startOffset
+        ) {
+          delete interstitial.error;
+          return count + 1;
+        }
+        return count;
+      }, 0);
+    }
+    return 0;
   }
 
   get duration(): number {
@@ -201,7 +217,8 @@ export class InterstitialsSchedule extends Logger {
           if (
             timelinePos === timelineStart ||
             (timelinePos > timelineStart &&
-              timelinePos < timelineStart + (asset.duration || 0))
+              (timelinePos < timelineStart + (asset.duration || 0) ||
+                i === length - 1))
           ) {
             return i;
           }
@@ -223,13 +240,20 @@ export class InterstitialsSchedule extends Logger {
     return null;
   }
 
-  public parseInterstitialDateRanges(mediaSelection: MediaSelection) {
+  public parseInterstitialDateRanges(
+    mediaSelection: MediaSelection,
+    enableAppendInPlace: boolean,
+  ) {
     const details = mediaSelection.main.details!;
     const { dateRanges } = details;
     const previousInterstitialEvents = this.events;
-    const interstitialEvents = this.parseDateRanges(dateRanges, {
-      url: details.url,
-    });
+    const interstitialEvents = this.parseDateRanges(
+      dateRanges,
+      {
+        url: details.url,
+      },
+      enableAppendInPlace,
+    );
     const ids = Object.keys(dateRanges);
     const removedInterstitials = previousInterstitialEvents
       ? previousInterstitialEvents.filter(
@@ -279,12 +303,14 @@ export class InterstitialsSchedule extends Logger {
   public updateSchedule(
     mediaSelection: MediaSelection,
     removedInterstitials: InterstitialEvent[] = [],
+    forceUpdate: boolean = false,
   ) {
     const events = this.events || [];
     if (events.length || removedInterstitials.length || this.length < 2) {
       const currentItems = this.items;
       const updatedItems = this.parseSchedule(events, mediaSelection);
       const updated =
+        forceUpdate ||
         removedInterstitials.length ||
         currentItems?.length !== updatedItems.length ||
         updatedItems.some((item, i) => {
@@ -303,14 +329,15 @@ export class InterstitialsSchedule extends Logger {
   }
 
   private parseDateRanges(
-    dateRanges: Record<string, DateRange>,
+    dateRanges: Record<string, DateRange | undefined>,
     baseData: BaseData,
+    enableAppendInPlace: boolean,
   ): InterstitialEvent[] {
     const interstitialEvents: InterstitialEvent[] = [];
     const ids = Object.keys(dateRanges);
     for (let i = 0; i < ids.length; i++) {
       const id = ids[i];
-      const dateRange = dateRanges[id];
+      const dateRange = dateRanges[id]!;
       if (dateRange.isInterstitial) {
         let interstitial = this.eventMap[id];
         if (interstitial) {
@@ -320,6 +347,9 @@ export class InterstitialsSchedule extends Logger {
         } else {
           interstitial = new InterstitialEvent(dateRange, baseData);
           this.eventMap[id] = interstitial;
+          if (enableAppendInPlace === false) {
+            interstitial.appendInPlace = enableAppendInPlace;
+          }
         }
         interstitialEvents.push(interstitial);
       }
@@ -350,7 +380,8 @@ export class InterstitialsSchedule extends Logger {
       interstitialEvents.forEach((interstitial, i) => {
         const preroll = interstitial.cue.pre;
         const postroll = interstitial.cue.post;
-        const previousEvent = interstitialEvents[i - 1] || null;
+        const previousEvent =
+          (interstitialEvents[i - 1] as InterstitialEvent | undefined) || null;
         const appendInPlace = interstitial.appendInPlace;
         const eventStart = postroll
           ? primaryDuration
@@ -554,14 +585,17 @@ export class InterstitialsSchedule extends Logger {
           interstitial.appendInPlace = false;
         }
       }
-      if (!interstitial.appendInPlace) {
+      if (!interstitial.appendInPlace && i + 1 < interstitialEvents.length) {
         // abutting Interstitials must use the same MediaSource strategy, this applies to all whether or not they are back to back:
-        for (let j = i - 1; i--; ) {
-          const timeBetween =
-            interstitialEvents[j + 1].startTime -
-            interstitialEvents[j].resumeTime;
-          if (timeBetween < ABUTTING_THRESHOLD_SECONDS) {
-            interstitialEvents[j].appendInPlace = false;
+        const timeBetween =
+          interstitialEvents[i + 1].startTime -
+          interstitialEvents[i].resumeTime;
+        if (timeBetween < ABUTTING_THRESHOLD_SECONDS) {
+          interstitialEvents[i + 1].appendInPlace = false;
+          if (interstitialEvents[i + 1].appendInPlace) {
+            this.warn(
+              `Could not change append strategy for abutting event ${interstitial}`,
+            );
           }
         }
       }
@@ -588,23 +622,16 @@ export class InterstitialsSchedule extends Logger {
       );
       return false;
     }
-    if (!mediaSelection) {
-      this.log(
-        `"${interstitial.identifier}" resumption ${resumeTime} can not be aligned with media (none selected)`,
-      );
-      return false;
-    }
     const playlists = Object.keys(mediaSelection);
     return !playlists.some((playlistType) => {
       const details = mediaSelection[playlistType].details;
       const playlistEnd = details.edge;
-      if (resumeTime > playlistEnd) {
-        if (playlists.length > 1) {
-          this.log(
-            `"${interstitial.identifier}" resumption ${resumeTime} past ${playlistType} playlist end ${playlistEnd}`,
-          );
-          return true;
-        }
+      if (resumeTime >= playlistEnd) {
+        // Live playback - resumption segments are not yet available
+        this.log(
+          `"${interstitial.identifier}" resumption ${resumeTime} past ${playlistType} playlist end ${playlistEnd}`,
+        );
+        // Assume alignment is possible (or reset can take place)
         return false;
       }
       const startFragment = findFragmentByPTS(
@@ -614,16 +641,16 @@ export class InterstitialsSchedule extends Logger {
       );
       if (!startFragment) {
         this.log(
-          `"${interstitial.identifier}" resumption ${resumeTime} does not align with any fragments in ${playlistType} playlist`,
+          `"${interstitial.identifier}" resumption ${resumeTime} does not align with any fragments in ${playlistType} playlist (${details.fragStart}-${details.fragmentEnd})`,
         );
         return true;
       }
-      const endAllowance = playlistType === 'audio' ? 0.175 : 0;
+      const allowance = playlistType === 'audio' ? 0.175 : 0;
       const alignedWithSegment =
         Math.abs(startFragment.start - resumeTime) <
-          ALIGNED_END_THRESHOLD_SECONDS ||
+          ALIGNED_END_THRESHOLD_SECONDS + allowance ||
         Math.abs(startFragment.end - resumeTime) <
-          ALIGNED_END_THRESHOLD_SECONDS + endAllowance;
+          ALIGNED_END_THRESHOLD_SECONDS + allowance;
       if (!alignedWithSegment) {
         this.log(
           `"${interstitial.identifier}" resumption ${resumeTime} not aligned with ${playlistType} fragment bounds (${startFragment.start}-${startFragment.end} sn: ${startFragment.sn} cc: ${startFragment.cc})`,
@@ -635,11 +662,15 @@ export class InterstitialsSchedule extends Logger {
   }
 
   private updateAssetDurations(interstitial: InterstitialEvent) {
+    if (!interstitial.assetListLoaded) {
+      return;
+    }
     const eventStart = interstitial.timelineStart;
     let sumDuration = 0;
     let hasUnknownDuration = false;
     let hasErrors = false;
-    interstitial.assetList.forEach((asset, i) => {
+    for (let i = 0; i < interstitial.assetList.length; i++) {
+      const asset = interstitial.assetList[i];
       const timelineStart = eventStart + sumDuration;
       asset.startOffset = sumDuration;
       asset.timelineStart = timelineStart;
@@ -647,7 +678,7 @@ export class InterstitialsSchedule extends Logger {
       hasErrors ||= !!asset.error;
       const duration = asset.error ? 0 : (asset.duration as number) || 0;
       sumDuration += duration;
-    });
+    }
     // Use the sum of known durations when it is greater than the stated duration
     if (hasUnknownDuration && !hasErrors) {
       interstitial.duration = Math.max(sumDuration, interstitial.duration);

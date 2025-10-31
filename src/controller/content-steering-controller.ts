@@ -1,4 +1,5 @@
 import { ErrorActionFlags, NetworkErrorAction } from './error-controller';
+import { ErrorDetails } from '../errors';
 import { Events } from '../events';
 import { Level } from '../types/level';
 import {
@@ -13,6 +14,7 @@ import {
 import { AttrList } from '../utils/attr-list';
 import { reassignFragmentLevelIndexes } from '../utils/level-helper';
 import { Logger } from '../utils/logger';
+import { stringify } from '../utils/safe-json-stringify';
 import type { RetryConfig } from '../config';
 import type Hls from '../hls';
 import type { NetworkComponentAPI } from '../types/component-api';
@@ -215,15 +217,19 @@ export default class ContentSteeringController
         this.updatePathwayPriority(pathwayPriority);
         errorAction.resolved = this.pathwayId !== errorPathway;
       }
-      if (!errorAction.resolved) {
+      if (data.details === ErrorDetails.BUFFER_APPEND_ERROR && !data.fatal) {
+        // Error will become fatal in buffer-controller when reaching `appendErrorMaxRetry`
+        // Stream-controllers are expected to reduce buffer length even if this is not deemed a QuotaExceededError
+        errorAction.resolved = true;
+      } else if (!errorAction.resolved) {
         this.warn(
           `Could not resolve ${data.details} ("${
             data.error.message
           }") with content-steering for Pathway: ${errorPathway} levels: ${
             levels ? levels.length : levels
-          } priorities: ${JSON.stringify(
+          } priorities: ${stringify(
             pathwayPriority,
-          )} penalized: ${JSON.stringify(this.penalizedPathways)}`,
+          )} penalized: ${stringify(this.penalizedPathways)}`,
         );
       }
     }

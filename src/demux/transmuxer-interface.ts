@@ -14,13 +14,14 @@ import { ErrorDetails, ErrorTypes } from '../errors';
 import { Events } from '../events';
 import { PlaylistLevelType } from '../types/loader';
 import { getM2TSSupportedAudioTypes } from '../utils/codecs';
+import { stringify } from '../utils/safe-json-stringify';
 import type { WorkerContext } from './inject-worker';
 import type { HlsEventEmitter, HlsListeners } from '../events';
 import type Hls from '../hls';
 import type { MediaFragment, Part } from '../loader/fragment';
 import type { ErrorData, FragDecryptedData } from '../types/events';
 import type { ChunkMetadata, TransmuxerResult } from '../types/transmuxer';
-import type { RationalTimestamp } from '../utils/timescale-conversion';
+import type { TimestampOffset } from '../utils/timescale-conversion';
 
 let transmuxerInstanceCount: number = 0;
 
@@ -95,7 +96,7 @@ export default class TransmuxerInterface {
             cmd: 'init',
             typeSupported: m2tsTypeSupported,
             id,
-            config: JSON.stringify(config),
+            config: stringify(config),
           });
         } catch (err) {
           logger.warn(
@@ -143,7 +144,7 @@ export default class TransmuxerInterface {
         resetNo: instanceNo,
         typeSupported: m2tsTypeSupported,
         id: this.id,
-        config: JSON.stringify(config),
+        config: stringify(config),
       });
     }
   }
@@ -192,7 +193,7 @@ export default class TransmuxerInterface {
     duration: number,
     accurateTimeOffset: boolean,
     chunkMeta: ChunkMetadata,
-    defaultInitPTS?: RationalTimestamp,
+    defaultInitPTS?: TimestampOffset,
   ) {
     chunkMeta.transmuxing.start = self.performance.now();
     const { instanceNo, transmuxer } = this;

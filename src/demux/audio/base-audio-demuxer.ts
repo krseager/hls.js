@@ -13,9 +13,11 @@ import {
   MetadataSchema,
 } from '../../types/demuxer';
 import { appendUint8Array } from '../../utils/mp4-tools';
-import { sliceUint8 } from '../../utils/typed-array';
 import { dummyTrack } from '../dummy-demuxed-track';
-import type { RationalTimestamp } from '../../utils/timescale-conversion';
+import type {
+  RationalTimestamp,
+  TimestampOffset,
+} from '../../utils/timescale-conversion';
 
 class BaseAudioDemuxer implements Demuxer {
   protected _audioTrack?: DemuxedAudioTrack;
@@ -23,7 +25,7 @@ class BaseAudioDemuxer implements Demuxer {
   protected frameIndex: number = 0;
   protected cachedData: Uint8Array | null = null;
   protected basePTS: number | null = null;
-  protected initPTS: RationalTimestamp | null = null;
+  protected initPTS: TimestampOffset | null = null;
   protected lastPTS: number | null = null;
 
   resetInitSegment(
@@ -43,7 +45,7 @@ class BaseAudioDemuxer implements Demuxer {
     };
   }
 
-  resetTimeStamp(deaultTimestamp: RationalTimestamp | null) {
+  resetTimeStamp(deaultTimestamp: TimestampOffset | null) {
     this.initPTS = deaultTimestamp;
     this.resetContiguity();
   }
@@ -129,7 +131,7 @@ class BaseAudioDemuxer implements Demuxer {
         offset++;
       }
       if (offset === length && lastDataIndex !== length) {
-        const partialData = sliceUint8(data, lastDataIndex);
+        const partialData = data.slice(lastDataIndex);
         if (this.cachedData) {
           this.cachedData = appendUint8Array(this.cachedData, partialData);
         } else {

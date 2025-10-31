@@ -3,6 +3,7 @@ import { ErrorDetails, ErrorTypes } from '../errors';
 import { Events } from '../events';
 import { HdcpLevels } from '../types/level';
 import { PlaylistContextType, PlaylistLevelType } from '../types/loader';
+import { getCodecsForMimeType } from '../utils/codecs';
 import {
   getRetryConfig,
   isTimeoutError,
@@ -340,7 +341,7 @@ export default class ErrorController
       // Search for next level to retry
       let nextLevel = -1;
       const { levels, loadLevel, minAutoLevel, maxAutoLevel } = hls;
-      if (!hls.autoLevelEnabled) {
+      if (!hls.autoLevelEnabled && !hls.config.preserveManualLevelOnError) {
         hls.loadLevel = -1;
       }
       const fragErrorType = data.frag?.type;
@@ -412,10 +413,10 @@ export default class ErrorController
               )) ||
             (findAudioCodecAlternate &&
               level.audioCodec === levelCandidate.audioCodec) ||
-            (!findAudioCodecAlternate &&
-              level.audioCodec !== levelCandidate.audioCodec) ||
             (findVideoCodecAlternate &&
-              level.codecSet === levelCandidate.codecSet)
+              level.codecSet === levelCandidate.codecSet) ||
+            (!findAudioCodecAlternate &&
+              level.codecSet !== levelCandidate.codecSet)
           ) {
             // For video/audio/subs frag errors find another group ID or fallthrough to redundant fail-over
             continue;
@@ -506,6 +507,19 @@ export default class ErrorController
       data.errorAction.resolved = true;
       // Stream controller is responsible for this but won't switch on false start
       this.hls.nextLoadLevel = this.hls.nextAutoLevel;
+      if (
+        data.details === ErrorDetails.BUFFER_ADD_CODEC_ERROR &&
+        data.mimeType &&
+        data.sourceBufferName !== 'audiovideo'
+      ) {
+        const codec = getCodecsForMimeType(data.mimeType);
+        const levels = this.hls.levels;
+        for (let i = levels.length; i--; ) {
+          if (levels[i][`${data.sourceBufferName}Codec`] === codec) {
+            this.hls.removeLevel(i);
+          }
+        }
+      }
     }
   }
 }

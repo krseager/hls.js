@@ -160,7 +160,7 @@ export default class StreamController
         // hls.nextLoadLevel remains until it is set to a new value or until a new frag is successfully loaded
         hls.nextLoadLevel = startLevel;
         this.level = hls.loadLevel;
-        this._hasEnoughToStart = false;
+        this._hasEnoughToStart = !!skipSeekToStartPosition;
       }
       // if startPosition undefined but lastCurrentTime set, set startPosition to last currentTime
       if (
@@ -176,7 +176,8 @@ export default class StreamController
         startPosition = lastCurrentTime;
       }
       this.state = State.IDLE;
-      this.nextLoadPosition = this.lastCurrentTime = startPosition;
+      this.nextLoadPosition = this.lastCurrentTime =
+        startPosition + this.timelineOffset;
       this.startPosition = skipSeekToStartPosition ? -1 : startPosition;
       this.tick();
     } else {
@@ -251,7 +252,9 @@ export default class StreamController
     // exit loop, as we either need more info (level not parsed) or we need media to be attached to load new fragment
     if (
       levelLastLoaded === null ||
-      (!media && (this.startFragRequested || !hls.config.startFragPrefetch))
+      (!media &&
+        !this.primaryPrefetch &&
+        (this.startFragRequested || !hls.config.startFragPrefetch))
     ) {
       return;
     }
@@ -342,7 +345,7 @@ export default class StreamController
       const backtrackSn = (this.backtrackFragment ?? frag).sn as number;
       const fragIdx = backtrackSn - levelDetails.startSN;
       const backtrackFrag = levelDetails.fragments[fragIdx - 1];
-      if (backtrackFrag && frag.cc === backtrackFrag.cc) {
+      if ((backtrackFrag as any) && frag.cc === backtrackFrag.cc) {
         frag = backtrackFrag;
         this.fragmentTracker.removeFragment(backtrackFrag);
       }
@@ -621,13 +624,13 @@ export default class StreamController
     // detect if we have different kind of audio codecs used amongst playlists
     let aac = false;
     let heaac = false;
-    data.levels.forEach((level) => {
-      const codec = level.audioCodec;
+    for (let i = 0; i < data.levels.length; i++) {
+      const codec = data.levels[i].audioCodec;
       if (codec) {
         aac = aac || codec.indexOf('mp4a.40.2') !== -1;
         heaac = heaac || codec.indexOf('mp4a.40.5') !== -1;
       }
-    });
+    }
     this.audioCodecSwitch = aac && heaac && !changeTypeSupported();
     if (this.audioCodecSwitch) {
       this.log(
@@ -733,7 +736,7 @@ export default class StreamController
       return;
     }
     const liveSyncPosition = this.hls.liveSyncPosition;
-    const currentTime = media.currentTime;
+    const currentTime = this.getLoadPosition();
     const start = levelDetails.fragmentStart;
     const end = levelDetails.edge;
     const withinSlidingWindow =
@@ -766,7 +769,37 @@ export default class StreamController
               3,
             )}`,
           );
-          media.currentTime = liveSyncPosition;
+
+          if (this.config.liveSyncMode === 'buffered') {
+            const bufferInfo = BufferHelper.bufferInfo(
+              media,
+              liveSyncPosition,
+              0,
+            );
+
+            if (!bufferInfo.buffered?.length) {
+              media.currentTime = liveSyncPosition;
+              return;
+            }
+
+            const isLiveSyncInBuffer = bufferInfo.start <= currentTime;
+
+            if (isLiveSyncInBuffer) {
+              media.currentTime = liveSyncPosition;
+              return;
+            }
+
+            const { nextStart } = BufferHelper.bufferedInfo(
+              bufferInfo.buffered,
+              currentTime,
+              0,
+            );
+            if (nextStart) {
+              media.currentTime = nextStart;
+            }
+          } else {
+            media.currentTime = liveSyncPosition;
+          }
         }
       }
     }
@@ -783,7 +816,7 @@ export default class StreamController
       return;
     }
     const currentLevel = levels[frag.level];
-    if (!currentLevel) {
+    if (!currentLevel as any) {
       this.warn(`Level ${frag.level} not found on progress`);
       return;
     }
@@ -874,7 +907,10 @@ export default class StreamController
       if (fromAltAudio) {
         this.fragmentTracker.removeAllFragments();
         hls.once(Events.BUFFER_FLUSHED, () => {
-          this.hls?.trigger(Events.AUDIO_TRACK_SWITCHED, data);
+          if (!this.hls as any) {
+            return;
+          }
+          this.hls.trigger(Events.AUDIO_TRACK_SWITCHED, data);
         });
         hls.trigger(Events.BUFFER_FLUSHING, {
           startOffset: 0,
@@ -975,7 +1011,7 @@ export default class StreamController
     if (!media) {
       return;
     }
-    if (!this._hasEnoughToStart && media.buffered.length) {
+    if (!this._hasEnoughToStart && BufferHelper.getBuffered(media).length) {
       this._hasEnoughToStart = true;
       this.seekToStartPos();
     }
@@ -1015,17 +1051,28 @@ export default class StreamController
           this.state = State.IDLE;
         }
         break;
+      case ErrorDetails.BUFFER_ADD_CODEC_ERROR:
       case ErrorDetails.BUFFER_APPEND_ERROR:
-      case ErrorDetails.BUFFER_FULL_ERROR:
-        if (!data.parent || data.parent !== 'main') {
-          return;
-        }
-        if (data.details === ErrorDetails.BUFFER_APPEND_ERROR) {
-          this.resetLoadingState();
+        if (data.parent !== 'main') {
           return;
         }
         if (this.reduceLengthAndFlushBuffer(data)) {
-          this.flushMainBuffer(0, Number.POSITIVE_INFINITY);
+          this.resetLoadingState();
+        }
+        break;
+      case ErrorDetails.BUFFER_FULL_ERROR:
+        if (data.parent !== 'main') {
+          return;
+        }
+        if (this.reduceLengthAndFlushBuffer(data)) {
+          const isAssetPlayer =
+            !this.config.interstitialsController && this.config.assetPlayerId;
+          if (isAssetPlayer) {
+            // Use currentTime in buffer estimate to prevent loading more until playback advances
+            this._hasEnoughToStart = true;
+          } else {
+            this.flushMainBuffer(0, Number.POSITIVE_INFINITY);
+          }
         }
         break;
       case ErrorDetails.INTERNAL_EXCEPTION:
@@ -1101,13 +1148,11 @@ export default class StreamController
       }
 
       // Offset start position by timeline offset
-      const details = this.getLevelDetails();
-      const configuredTimelineOffset = this.config.timelineOffset;
-      if (configuredTimelineOffset && startPosition) {
-        startPosition +=
-          details?.appliedTimelineOffset || configuredTimelineOffset;
+      const timelineOffset = this.timelineOffset;
+      if (timelineOffset && startPosition) {
+        startPosition += timelineOffset;
       }
-
+      const details = this.getLevelDetails();
       const buffered = BufferHelper.getBuffered(media);
       const bufferStart = buffered.length ? buffered.start(0) : 0;
       const delta = bufferStart - startPosition;
@@ -1116,9 +1161,10 @@ export default class StreamController
         this.config.maxFragLookUpTolerance,
       );
       if (
-        delta > 0 &&
-        (delta < skipTolerance ||
-          (this.loadingParts && delta < 2 * (details?.partTarget || 0)))
+        this.config.startOnSegmentBoundary ||
+        (delta > 0 &&
+          (delta < skipTolerance ||
+            (this.loadingParts && delta < 2 * (details?.partTarget || 0))))
       ) {
         this.log(`adjusting start position by ${delta} to match buffer start`);
         startPosition += delta;
@@ -1197,35 +1243,54 @@ export default class StreamController
     this.state = State.PARSING;
 
     if (initSegment) {
-      if (initSegment?.tracks) {
+      const tracks = initSegment.tracks;
+      if (tracks) {
         const mapFragment = frag.initSegment || frag;
-        this._bufferInitSegment(
-          level,
-          initSegment.tracks,
-          mapFragment,
-          chunkMeta,
-        );
+        if (this.unhandledEncryptionError(initSegment, frag)) {
+          return;
+        }
+        this._bufferInitSegment(level, tracks, mapFragment, chunkMeta);
         hls.trigger(Events.FRAG_PARSING_INIT_SEGMENT, {
           frag: mapFragment,
           id,
-          tracks: initSegment.tracks,
+          tracks,
         });
       }
 
-      // This would be nice if Number.isFinite acted as a typeguard, but it doesn't. See: https://github.com/Microsoft/TypeScript/issues/10038
-      const initPTS = initSegment.initPTS as number;
+      const baseTime = initSegment.initPTS as number;
       const timescale = initSegment.timescale as number;
-      if (Number.isFinite(initPTS)) {
-        this.initPTS[frag.cc] = { baseTime: initPTS, timescale };
-        hls.trigger(Events.INIT_PTS_FOUND, { frag, id, initPTS, timescale });
+      const initPTS = this.initPTS[frag.cc];
+      if (
+        Number.isFinite(baseTime) &&
+        ((!initPTS as any) ||
+          initPTS.baseTime !== baseTime ||
+          initPTS.timescale !== timescale)
+      ) {
+        const trackId = initSegment.trackId as number;
+        this.initPTS[frag.cc] = {
+          baseTime,
+          timescale,
+          trackId,
+        };
+        hls.trigger(Events.INIT_PTS_FOUND, {
+          frag,
+          id,
+          initPTS: baseTime,
+          timescale,
+          trackId,
+        });
       }
     }
 
     // Avoid buffering if backtracking this fragment
     if (video && details) {
+      if (audio && video.type === 'audiovideo') {
+        this.logMuxedErr(frag);
+      }
       const prevFrag = details.fragments[frag.sn - 1 - details.startSN];
       const isFirstFragment = frag.sn === details.startSN;
-      const isFirstInDiscontinuity = !prevFrag || frag.cc > prevFrag.cc;
+      const isFirstInDiscontinuity =
+        (!prevFrag as any) || frag.cc > prevFrag.cc;
       if (remuxResult.independent !== false) {
         const { startPTS, endPTS, startDTS, endDTS } = video;
         if (part) {
@@ -1328,7 +1393,7 @@ export default class StreamController
       this.bufferFragmentData(audio, frag, part, chunkMeta);
     }
 
-    if (details && id3?.samples?.length) {
+    if (details && id3?.samples.length) {
       const emittedID3: FragParsingMetadataData = {
         id,
         frag,
@@ -1348,6 +1413,12 @@ export default class StreamController
     }
   }
 
+  private logMuxedErr(frag: Fragment) {
+    this.warn(
+      `${isMediaFragment(frag) ? 'Media' : 'Init'} segment with muxed audiovideo where only video expected: ${frag.url}`,
+    );
+  }
+
   private _bufferInitSegment(
     currentLevel: Level,
     tracks: TrackSet,
@@ -1363,15 +1434,16 @@ export default class StreamController
     // if audio track is expected to come from audio stream controller, discard any coming from main
     if (this.altAudio && !this.audioOnly) {
       delete tracks.audio;
+      if (tracks.audiovideo) {
+        this.logMuxedErr(frag);
+      }
     }
     // include levelCodec in audio and video tracks
     const { audio, video, audiovideo } = tracks;
     if (audio) {
-      let audioCodec = pickMostCompleteCodecName(
-        audio.codec,
-        currentLevel.audioCodec,
-      );
-      // Add level and profile to make up for passthrough-remuxer not being able to parse full codec
+      const levelCodec = currentLevel.audioCodec;
+      let audioCodec = pickMostCompleteCodecName(audio.codec, levelCodec);
+      // Add level and profile to make up for remuxer not being able to parse full codec
       // (logger warning "Unhandled audio codec...")
       if (audioCodec === 'mp4a') {
         audioCodec = 'mp4a.40.5';
@@ -1410,25 +1482,25 @@ export default class StreamController
         audioCodec = 'mp4a.40.2';
         this.log(`Android: force audio codec to ${audioCodec}`);
       }
-      if (currentLevel.audioCodec && currentLevel.audioCodec !== audioCodec) {
+      if (levelCodec && levelCodec !== audioCodec) {
         this.log(
-          `Swapping manifest audio codec "${currentLevel.audioCodec}" for "${audioCodec}"`,
+          `Swapping manifest audio codec "${levelCodec}" for "${audioCodec}"`,
         );
       }
       audio.levelCodec = audioCodec;
-      audio.id = 'main';
+      audio.id = PlaylistLevelType.MAIN;
       this.log(
         `Init audio buffer, container:${
           audio.container
         }, codecs[selected/level/parsed]=[${audioCodec || ''}/${
-          currentLevel.audioCodec || ''
+          levelCodec || ''
         }/${audio.codec}]`,
       );
       delete tracks.audiovideo;
     }
     if (video) {
       video.levelCodec = currentLevel.videoCodec;
-      video.id = 'main';
+      video.id = PlaylistLevelType.MAIN;
       const parsedVideoCodec = video.codec;
       if (parsedVideoCodec?.length === 4) {
         // Make up for passthrough-remuxer not being able to parse full codec
@@ -1451,7 +1523,7 @@ export default class StreamController
           video.container
         }, codecs[level/parsed]=[${currentLevel.videoCodec || ''}/${
           parsedVideoCodec
-        }${video.codec !== parsedVideoCodec ? ' parsed-corrected=' + video.codec : ''}}]`,
+        }]${video.codec !== parsedVideoCodec ? ' parsed-corrected=' + video.codec : ''}${video.supplemental ? ' supplemental=' + video.supplemental : ''}`,
       );
       delete tracks.audiovideo;
     }
@@ -1465,7 +1537,7 @@ export default class StreamController
     const trackTypes = Object.keys(tracks);
     if (trackTypes.length) {
       this.hls.trigger(Events.BUFFER_CODECS, tracks as BufferCodecsData);
-      if (!this.hls) {
+      if (!this.hls as any) {
         // Exit after fatal tracks error
         return;
       }
@@ -1490,10 +1562,12 @@ export default class StreamController
   }
 
   public getMainFwdBufferInfo(): BufferInfo | null {
-    return this.getFwdBufferInfo(
-      this.mediaBuffer ? this.mediaBuffer : this.media,
-      PlaylistLevelType.MAIN,
-    );
+    // Observe video SourceBuffer (this.mediaBuffer) only when alt-audio is used, otherwise observe combined media buffer
+    const bufferOutput =
+      this.mediaBuffer && this.altAudio === AlternateAudio.SWITCHED
+        ? this.mediaBuffer
+        : this.media;
+    return this.getFwdBufferInfo(bufferOutput, PlaylistLevelType.MAIN);
   }
 
   public get maxBufferLength(): number {

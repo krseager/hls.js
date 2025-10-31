@@ -12,6 +12,8 @@ import {
   videoCodecPreferenceValue,
 } from '../utils/codecs';
 import { reassignFragmentLevelIndexes } from '../utils/level-helper';
+import { getUnsupportedResult } from '../utils/mediacapabilities-helper';
+import { stringify } from '../utils/safe-json-stringify';
 import type ContentSteeringController from './content-steering-controller';
 import type Hls from '../hls';
 import type {
@@ -125,7 +127,7 @@ export default class LevelController extends BasePlaylistController {
           undefined;
       }
 
-      if (videoCodec?.indexOf('avc1') === 0) {
+      if (videoCodec) {
         videoCodec = levelParsed.videoCodec = convertAVC1ToAVCOTI(videoCodec);
       }
 
@@ -162,6 +164,7 @@ export default class LevelController extends BasePlaylistController {
         (audioCodec && !this.isAudioSupported(audioCodec)) ||
         (videoCodec && !this.isVideoSupported(videoCodec))
       ) {
+        this.log(`Some or all CODECS not supported "${attributes.CODECS}"`);
         return;
       }
 
@@ -177,7 +180,7 @@ export default class LevelController extends BasePlaylistController {
       const levelKey = `${contentSteeringPrefix}${levelParsed.bitrate}-${RESOLUTION}-${FRAMERATE}-${CODECS}-${VIDEO_RANGE}-${HDCP}`;
 
       if (!redundantSet[levelKey]) {
-        const level = new Level(levelParsed);
+        const level = this.createLevel(levelParsed);
         redundantSet[levelKey] = level;
         generatePathwaySet[levelKey] = 1;
         levels.push(level);
@@ -189,7 +192,7 @@ export default class LevelController extends BasePlaylistController {
         // Content Steering controller to handles Pathway fallback on error
         const pathwayCount = (generatePathwaySet[levelKey] += 1);
         levelParsed.attrs['PATHWAY-ID'] = new Array(pathwayCount + 1).join('.');
-        const level = new Level(levelParsed);
+        const level = this.createLevel(levelParsed);
         redundantSet[levelKey] = level;
         levels.push(level);
       } else {
@@ -205,6 +208,22 @@ export default class LevelController extends BasePlaylistController {
       videoCodecFound,
       audioCodecFound,
     );
+  }
+
+  private createLevel(levelParsed: LevelParsed): Level {
+    const level = new Level(levelParsed);
+    const supplemental = levelParsed.supplemental;
+    if (
+      supplemental?.videoCodec &&
+      !this.isVideoSupported(supplemental.videoCodec)
+    ) {
+      const error = new Error(
+        `SUPPLEMENTAL-CODECS not supported "${supplemental.videoCodec}"`,
+      );
+      this.log(error.message);
+      level.supportedResult = getUnsupportedResult(error, []);
+    }
+    return level;
   }
 
   private isAudioSupported(codec: string): boolean {
@@ -246,23 +265,27 @@ export default class LevelController extends BasePlaylistController {
       // Dispatch error after MANIFEST_LOADED is done propagating
       Promise.resolve().then(() => {
         if (this.hls) {
+          let message = 'no level with compatible codecs found in manifest';
+          let reason = message;
           if (data.levels.length) {
-            this.warn(
-              `One or more CODECS in variant not supported: ${JSON.stringify(
-                data.levels[0].attrs,
-              )}`,
-            );
+            reason = `one or more CODECS in variant not supported: ${stringify(
+              data.levels
+                .map((level) => level.attrs.CODECS)
+                .filter(
+                  (value, index, array) => array.indexOf(value) === index,
+                ),
+            )}`;
+            this.warn(reason);
+            message += ` (${reason})`;
           }
-          const error = new Error(
-            'no level with compatible codecs found in manifest',
-          );
+          const error = new Error(message);
           this.hls.trigger(Events.ERROR, {
             type: ErrorTypes.MEDIA_ERROR,
             details: ErrorDetails.MANIFEST_INCOMPATIBLE_CODECS_ERROR,
             fatal: true,
             url: data.url,
             error,
-            reason: error.message,
+            reason,
           });
         }
       });
@@ -367,6 +390,10 @@ export default class LevelController extends BasePlaylistController {
     // Audio is only alternate if manifest include a URI along with the audio group tag,
     // and this is not an audio-only stream where levels contain audio-only
     const audioOnly = audioCodecFound && !videoCodecFound;
+    const config = this.hls.config;
+    const altAudioEnabled = !!(
+      config.audioStreamController && config.audioTrackController
+    );
     const edata: ManifestParsedData = {
       levels,
       audioTracks,
@@ -377,7 +404,8 @@ export default class LevelController extends BasePlaylistController {
       stats: data.stats,
       audio: audioCodecFound,
       video: videoCodecFound,
-      altAudio: !audioOnly && audioTracks.some((t) => !!t.url),
+      altAudio:
+        altAudioEnabled && !audioOnly && audioTracks.some((t) => !!t.url),
     };
     this.hls.trigger(Events.MANIFEST_PARSED, edata);
   }

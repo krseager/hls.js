@@ -34,7 +34,7 @@ import { appendUint8Array, RemuxerTrackIdConfig } from '../utils/mp4-tools';
 import type { HlsConfig } from '../config';
 import type { HlsEventEmitter } from '../events';
 import type BaseVideoParser from './video/base-video-parser';
-import type { AudioFrame } from '../types/demuxer';
+import type { AudioFrame, DemuxedAAC } from '../types/demuxer';
 import type { TypeSupported } from '../utils/codecs';
 import type { ILogger } from '../utils/logger';
 
@@ -191,6 +191,7 @@ class TSDemuxer implements Demuxer {
     this._audioTrack.segmentCodec = 'aac';
 
     // flush any partial content
+    this.videoParser = null;
     this.aacOverFlow = null;
     this.remainderData = null;
     this.audioCodec = audioCodec;
@@ -291,18 +292,7 @@ class TSDemuxer implements Demuxer {
           case videoPid:
             if (stt) {
               if (videoData && (pes = parsePES(videoData, this.logger))) {
-                if (this.videoParser === null) {
-                  switch (videoTrack.segmentCodec) {
-                    case 'avc':
-                      this.videoParser = new AvcVideoParser();
-                      break;
-                    case 'hevc':
-                      if (__USE_M2TS_ADVANCED_CODECS__) {
-                        this.videoParser = new HevcVideoParser();
-                      }
-                      break;
-                  }
-                }
+                this.readyVideoParser(videoTrack.segmentCodec);
                 if (this.videoParser !== null) {
                   this.videoParser.parsePES(videoTrack, textTrack, pes, false);
                 }
@@ -477,18 +467,7 @@ class TSDemuxer implements Demuxer {
     // try to parse last PES packets
     let pes: PES | null;
     if (videoData && (pes = parsePES(videoData, this.logger))) {
-      if (this.videoParser === null) {
-        switch (videoTrack.segmentCodec) {
-          case 'avc':
-            this.videoParser = new AvcVideoParser();
-            break;
-          case 'hevc':
-            if (__USE_M2TS_ADVANCED_CODECS__) {
-              this.videoParser = new HevcVideoParser();
-            }
-            break;
-        }
-      }
+      this.readyVideoParser(videoTrack.segmentCodec);
       if (this.videoParser !== null) {
         this.videoParser.parsePES(
           videoTrack as DemuxedVideoTrack,
@@ -557,6 +536,16 @@ class TSDemuxer implements Demuxer {
     return this.decrypt(demuxResult, sampleAes);
   }
 
+  private readyVideoParser(codec: string | undefined) {
+    if (this.videoParser === null) {
+      if (codec === 'avc') {
+        this.videoParser = new AvcVideoParser();
+      } else if (__USE_M2TS_ADVANCED_CODECS__ && codec === 'hevc') {
+        this.videoParser = new HevcVideoParser();
+      }
+    }
+  }
+
   private decrypt(
     demuxResult: DemuxerResult,
     sampleAes: SampleAesDecrypter,
@@ -564,15 +553,19 @@ class TSDemuxer implements Demuxer {
     return new Promise((resolve) => {
       const { audioTrack, videoTrack } = demuxResult;
       if (audioTrack.samples && audioTrack.segmentCodec === 'aac') {
-        sampleAes.decryptAacSamples(audioTrack.samples, 0, () => {
-          if (videoTrack.samples) {
-            sampleAes.decryptAvcSamples(videoTrack.samples, 0, 0, () => {
+        sampleAes.decryptAacSamples(
+          (audioTrack as DemuxedAAC).samples,
+          0,
+          () => {
+            if (videoTrack.samples) {
+              sampleAes.decryptAvcSamples(videoTrack.samples, 0, 0, () => {
+                resolve(demuxResult);
+              });
+            } else {
               resolve(demuxResult);
-            });
-          } else {
-            resolve(demuxResult);
-          }
-        });
+            }
+          },
+        );
       } else if (videoTrack.samples) {
         sampleAes.decryptAvcSamples(videoTrack.samples, 0, 0, () => {
           resolve(demuxResult);

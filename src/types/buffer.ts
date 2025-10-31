@@ -20,6 +20,8 @@ export interface BaseTrack {
   id: 'audio' | 'main';
   container: string;
   codec?: string;
+  supplemental?: string;
+  encrypted?: boolean;
   levelCodec?: string;
   pendingCodec?: string;
   metadata?: {

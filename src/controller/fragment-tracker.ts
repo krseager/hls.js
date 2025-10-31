@@ -36,7 +36,7 @@ export class FragmentTracker implements ComponentAPI {
     | null = Object.create(null);
 
   private bufferPadding: number = 0.2;
-  private hls: Hls;
+  private hls: Hls | null;
   private hasGaps: boolean = false;
 
   constructor(hls: Hls) {
@@ -47,24 +47,30 @@ export class FragmentTracker implements ComponentAPI {
 
   private _registerListeners() {
     const { hls } = this;
-    hls.on(Events.MANIFEST_LOADING, this.onManifestLoading, this);
-    hls.on(Events.BUFFER_APPENDED, this.onBufferAppended, this);
-    hls.on(Events.FRAG_BUFFERED, this.onFragBuffered, this);
-    hls.on(Events.FRAG_LOADED, this.onFragLoaded, this);
+    if (hls) {
+      hls.on(Events.MANIFEST_LOADING, this.onManifestLoading, this);
+      hls.on(Events.BUFFER_APPENDED, this.onBufferAppended, this);
+      hls.on(Events.FRAG_BUFFERED, this.onFragBuffered, this);
+      hls.on(Events.FRAG_LOADED, this.onFragLoaded, this);
+    }
   }
 
   private _unregisterListeners() {
     const { hls } = this;
-    hls.off(Events.MANIFEST_LOADING, this.onManifestLoading, this);
-    hls.off(Events.BUFFER_APPENDED, this.onBufferAppended, this);
-    hls.off(Events.FRAG_BUFFERED, this.onFragBuffered, this);
-    hls.off(Events.FRAG_LOADED, this.onFragLoaded, this);
+    if (hls) {
+      hls.off(Events.MANIFEST_LOADING, this.onManifestLoading, this);
+      hls.off(Events.BUFFER_APPENDED, this.onBufferAppended, this);
+      hls.off(Events.FRAG_BUFFERED, this.onFragBuffered, this);
+      hls.off(Events.FRAG_LOADED, this.onFragLoaded, this);
+    }
   }
 
   public destroy() {
     this._unregisterListeners();
     // @ts-ignore
-    this.fragments =
+    this.hls =
+      // @ts-ignore
+      this.fragments =
       // @ts-ignore
       this.activePartLists =
       // @ts-ignore
@@ -80,19 +86,18 @@ export class FragmentTracker implements ComponentAPI {
   public getAppendedFrag(
     position: number,
     levelType: PlaylistLevelType,
-  ): Fragment | Part | null {
+  ): MediaFragment | Part | null {
     const activeParts = this.activePartLists[levelType];
     if (activeParts) {
       for (let i = activeParts.length; i--; ) {
         const activePart = activeParts[i];
-        if (!activePart) {
+        if (!activePart as any) {
           break;
         }
-        const appendedPTS = activePart.end;
         if (
           activePart.start <= position &&
-          appendedPTS !== null &&
-          position <= appendedPTS
+          position <= activePart.end &&
+          activePart.loaded
         ) {
           return activePart;
         }
@@ -247,7 +252,8 @@ export class FragmentTracker implements ComponentAPI {
     if (!activeParts) {
       return;
     }
-    this.activePartLists[levelType] = activeParts.filter(
+    this.activePartLists[levelType] = filterParts(
+      activeParts,
       (part) => part.fragment.sn >= snToKeep,
     );
   }
@@ -503,12 +509,12 @@ export class FragmentTracker implements ComponentAPI {
 
   public removeFragment(fragment: Fragment) {
     const fragKey = getFragmentKey(fragment);
-    fragment.stats.loaded = 0;
     fragment.clearElementaryStreamInfo();
     const activeParts = this.activePartLists[fragment.type];
     if (activeParts) {
       const snToRemove = fragment.sn;
-      this.activePartLists[fragment.type] = activeParts.filter(
+      this.activePartLists[fragment.type] = filterParts(
+        activeParts,
         (part) => part.fragment.sn !== snToRemove,
       );
     }
@@ -533,13 +539,25 @@ export class FragmentTracker implements ComponentAPI {
 function isPartial(fragmentEntity: FragmentEntity): boolean {
   return (
     fragmentEntity.buffered &&
-    (fragmentEntity.body.gap ||
+    !!(
+      fragmentEntity.body.gap ||
       fragmentEntity.range.video?.partial ||
       fragmentEntity.range.audio?.partial ||
-      fragmentEntity.range.audiovideo?.partial)
+      fragmentEntity.range.audiovideo?.partial
+    )
   );
 }
 
 function getFragmentKey(fragment: Fragment): string {
   return `${fragment.type}_${fragment.level}_${fragment.sn}`;
+}
+
+function filterParts(partList: Part[], predicate: (part: Part) => boolean) {
+  return partList.filter((part) => {
+    const keep = predicate(part);
+    if (!keep) {
+      part.clearElementaryStreamInfo();
+    }
+    return keep;
+  });
 }

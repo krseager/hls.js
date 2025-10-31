@@ -13,7 +13,7 @@ import M3U8Parser from '../../../src/loader/m3u8-parser';
 import { Level } from '../../../src/types/level';
 import { PlaylistLevelType } from '../../../src/types/loader';
 import { AttrList } from '../../../src/utils/attr-list';
-import { mockFragments } from '../../mocks/data';
+import { mockFragments as mockFragmentArray } from '../../mocks/data';
 import type { FragmentTracker } from '../../../src/controller/fragment-tracker';
 import type StreamController from '../../../src/controller/stream-controller';
 import type { MediaFragment } from '../../../src/loader/fragment';
@@ -29,6 +29,7 @@ describe('StreamController', function () {
   let fragmentTracker: FragmentTracker;
   let streamController: StreamController;
   const attrs: LevelAttributes = new AttrList({});
+  const mockFragments = mockFragmentArray as MediaFragment[];
 
   beforeEach(function () {
     fake = sinon.useFakeXMLHttpRequest();
@@ -209,7 +210,7 @@ describe('StreamController', function () {
     fragPrevious.programDateTime = 1505502671523;
     fragPrevious.duration = 5.0;
     fragPrevious.level = 1;
-    fragPrevious.start = 10.0;
+    fragPrevious.setStart(10.0);
     fragPrevious.sn = 2; // Fragment with PDT 1505502671523 in level 1 does not have the same sn as in level 2 where cc is 1
     fragPrevious.cc = 0;
 
@@ -267,16 +268,13 @@ describe('StreamController', function () {
       let fragPrevious;
 
       beforeEach(function () {
-        // onLevelUpdated updates  latencyController.levelDetails used to get live sync position
-        hls['latencyController']['levelDetails'] = levelDetails;
-
         fragPrevious = new Fragment(PlaylistLevelType.MAIN, '');
         // Fragment with PDT 1505502681523 in level 1 does not have the same sn as in level 2 where cc is 1
         fragPrevious.cc = 0;
         fragPrevious.programDateTime = 1505502681523;
         fragPrevious.duration = 5.0;
         fragPrevious.level = 1;
-        fragPrevious.start = 15.0;
+        fragPrevious.setStart(15.0);
         fragPrevious.sn = 3;
         streamController['fragPrevious'] = fragPrevious;
 
@@ -287,10 +285,8 @@ describe('StreamController', function () {
 
       describe('with program-date-time', function () {
         it('does PDT search, choosing fragment after level loaded', function () {
-          const foundFragment = streamController['getInitialLiveFragment'](
-            levelDetails,
-            mockFragments,
-          );
+          const foundFragment =
+            streamController['getInitialLiveFragment'](levelDetails);
           expect(foundFragment).to.equal(
             mockFragments[4],
             `Expected sn 4, found sn segment ${
@@ -325,10 +321,8 @@ describe('StreamController', function () {
 
         it('finds the next fragment to load based on the last fragment buffered', function () {
           fragPrevious.sn = 0;
-          let foundFragment = streamController['getInitialLiveFragment'](
-            levelDetails,
-            fragmentsWithoutPdt,
-          );
+          let foundFragment =
+            streamController['getInitialLiveFragment'](levelDetails);
           expect(foundFragment).to.equal(
             fragmentsWithoutPdt[1],
             `Expected sn 1, found sn segment ${
@@ -337,10 +331,8 @@ describe('StreamController', function () {
           );
 
           fragPrevious.sn = 3;
-          foundFragment = streamController['getInitialLiveFragment'](
-            levelDetails,
-            fragmentsWithoutPdt,
-          );
+          foundFragment =
+            streamController['getInitialLiveFragment'](levelDetails);
           expect(foundFragment).to.equal(
             fragmentsWithoutPdt[4],
             `Expected sn 4, found sn segment ${
@@ -352,10 +344,8 @@ describe('StreamController', function () {
         it('finds the first fragment to load when starting or re-syncing with a live stream', function () {
           streamController['fragPrevious'] = null;
 
-          const foundFragment = streamController['getInitialLiveFragment'](
-            levelDetails,
-            fragmentsWithoutPdt,
-          );
+          const foundFragment =
+            streamController['getInitialLiveFragment'](levelDetails);
           expect(foundFragment).to.equal(
             fragmentsWithoutPdt[2],
             `Expected sn 2, found sn segment ${
@@ -366,10 +356,8 @@ describe('StreamController', function () {
 
         it('finds the fragment with the same cc when there is no sn match', function () {
           fragPrevious.cc = 0;
-          const foundFragment = streamController['getInitialLiveFragment'](
-            levelDetails,
-            fragmentsWithoutPdt,
-          );
+          const foundFragment =
+            streamController['getInitialLiveFragment'](levelDetails);
           expect(foundFragment).to.equal(
             fragmentsWithoutPdt[0],
             `Expected sn 0, found sn segment ${
@@ -380,10 +368,8 @@ describe('StreamController', function () {
 
         it('returns null when there is no cc match with the previous segment', function () {
           fragPrevious.cc = 2;
-          const foundFragment = streamController['getInitialLiveFragment'](
-            levelDetails,
-            fragmentsWithoutPdt,
-          );
+          const foundFragment =
+            streamController['getInitialLiveFragment'](levelDetails);
           expect(foundFragment).to.equal(null);
         });
       });
@@ -489,7 +475,7 @@ describe('StreamController', function () {
       ) as MediaFragment;
       firstFrag.duration = 5.0;
       firstFrag.level = 1;
-      firstFrag.start = 0;
+      firstFrag.setStart(0);
       firstFrag.sn = 1;
       firstFrag.cc = 0;
       firstFrag.elementaryStreams.video = {
@@ -509,6 +495,42 @@ describe('StreamController', function () {
         id: 'main',
       });
       expect(seekStub).to.have.been.calledOnce;
+    });
+
+    it('should seek to start pos when media is buffered and seek to segment boundary', function () {
+      streamController['config'].startOnSegmentBoundary = true;
+      streamController['startPosition'] = 7;
+      streamController['media']?.buffered;
+      streamController['media'] = {
+        buffered: {
+          start() {
+            return 5;
+          },
+          length: 1,
+        },
+        currentTime: 0,
+      } as any as HTMLMediaElement;
+
+      streamController['seekToStartPos']();
+      expect(streamController['media']!.currentTime).to.equal(5);
+    });
+
+    it('should seek to start pos when media is buffered and not seek to segment boundary', function () {
+      streamController['config'].startOnSegmentBoundary = false;
+      streamController['startPosition'] = 7;
+      streamController['media']?.buffered;
+      streamController['media'] = {
+        buffered: {
+          start() {
+            return 5;
+          },
+          length: 1,
+        },
+        currentTime: 0,
+      } as any as HTMLMediaElement;
+
+      streamController['seekToStartPos']();
+      expect(streamController['media']!.currentTime).to.equal(7);
     });
 
     describe('seekToStartPos', function () {

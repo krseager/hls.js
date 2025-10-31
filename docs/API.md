@@ -30,6 +30,7 @@ See [API Reference](https://hlsjs-dev.video-dev.org/api-docs/) for a complete li
   - [`maxBufferLength`](#maxbufferlength)
   - [`backBufferLength`](#backbufferlength)
   - [`frontBufferFlushThreshold`](#frontbufferflushthreshold)
+  - [`startOnSegmentBoundary`](#startonsegmentboundary)
   - [`maxBufferSize`](#maxbuffersize)
   - [`maxBufferHole`](#maxbufferhole)
   - [`maxStarvationDelay`](#maxstarvationdelay)
@@ -42,6 +43,7 @@ See [API Reference](https://hlsjs-dev.video-dev.org/api-docs/) for a complete li
   - [`nudgeOnVideoHole`](#nudgeonvideohole)
   - [`maxFragLookUpTolerance`](#maxfraglookuptolerance)
   - [`maxMaxBufferLength`](#maxmaxbufferlength)
+  - [`liveSyncMode`](#livesyncmode)
   - [`liveSyncDurationCount`](#livesyncdurationcount)
   - [`liveSyncOnStallIncrease`](#livesynconstallincrease)
   - [`liveMaxLatencyDurationCount`](#livemaxlatencydurationcount)
@@ -348,22 +350,44 @@ hls.on(Hls.Events.ERROR, function (event, data) {
 
 #### Fatal Error Recovery
 
-HLS.js provides several methods for attempting playback recover in the event of a decoding error in the HTMLMediaElement:
+HLS.js provides methods for attempting playback recover in the event of a decoding error in the HTMLMediaElement:
 
 ##### `hls.recoverMediaError()`
 
-Resets the MediaSource and restarts streaming from the last known playhead position.
+Resets the MediaSource and restarts streaming from the last known playhead position. This should only be used when the media element is in an error state.
+It should not be used in response to non-fatal hls.js error events.
 
 ###### Error recovery sample code
 
 ```js
-hls.on(Hls.Events.ERROR, function (event, data) {
+let attemptedErrorRecovery = null;
+
+video.addEventListener('error', (event) {
+  const mediaError = event.currentTarget.error;
+  if (mediaError.code === mediaError.MEDIA_ERR_DECODE) {
+    const now = Date.now();
+    if (!attemptedErrorRecovery || now - attemptedErrorRecovery > 5000) {
+      attemptedErrorRecovery = now;
+      hls.recoverMediaError();
+    }
+  }
+});
+
+hls.on(Hls.Events.ERROR, function (name, data) {
+  // Special handling is only needed to errors flagged as `fatal`.
   if (data.fatal) {
     switch (data.type) {
-      case Hls.ErrorTypes.MEDIA_ERROR:
-        console.log('fatal media error encountered, try to recover');
-        hls.recoverMediaError();
+      case Hls.ErrorTypes.MEDIA_ERROR: {
+        const now = Date.now();
+        if (!attemptedErrorRecovery || now - attemptedErrorRecovery > 5000) {
+          console.log('Fatal media error encountered (' + video.error + + '), attempting to recover');
+          attemptedErrorRecovery = now;
+          hls.recoverMediaError();
+        } else {
+          console.log('Skipping media error recovery (only ' + (now - attemptedErrorRecovery) + 'ms since last error)');
+        }
         break;
+      }
       case Hls.ErrorTypes.NETWORK_ERROR:
         console.error('fatal network error encountered', data);
         // All retries and media options have been exhausted.
@@ -590,6 +614,13 @@ The maximum duration of buffered media to keep once it has been played, in secon
 
 The maximum duration of buffered media, in seconds, from the play position to keep before evicting non-contiguous forward ranges. A value of `Infinity` means no active eviction will take place; This value will always be at least the `maxBufferLength`.
 
+### `startOnSegmentBoundary`
+
+(default: `false`)
+
+When set to `true`, the player will align the live start position with the closest video segment boundary when preparing playback. This ensures playback starts at a clean segment boundary rather than potentially in the middle of a segment, which can prevent some segment skipping. This is helpful for when liveSyncDurationCount or liveSyncDuration, do not calculate start position to be the start position of a segment.
+Setting this to `true` may increase initial live playback latency slightly, but can provide more stable playback start. When set to `false`, playback will start at the exact position determined by the player's live sync calculations, which could be in the middle of a segment.
+
 ### `maxBufferSize`
 
 (default: 60 MB)
@@ -693,6 +724,15 @@ this is to mimic the browser behaviour (the buffer eviction algorithm is startin
 `maxBufferLength` is the minimum guaranteed buffer length that HLS.js will try to achieve, even if that value exceeds the amount of bytes 60 MB of memory.
 `maxMaxBufferLength` acts as a capping value, as if bitrate is really low, you could need more than one hour of buffer to fill 60 MB.
 
+### `liveSyncMode`
+
+(default: `'edge'`)
+
+Controls how playback synchronizes to the live edge:
+
+- `'edge'`: When the playhead moves outside the prescribed distance from the live edge, immediately jump to `liveSyncPosition`.
+- `'buffered'`: When the playhead moves outside the prescribed distance from the live edge, if `liveSyncPosition` is buffered, seek there; otherwise, continue playback from the start of the next buffered segment.
+
 ### `liveSyncDurationCount`
 
 (default: `3`)
@@ -716,10 +756,10 @@ Decreasing this value will mean that each stall will have less affect on `hls.ta
 
 (default: `Infinity`)
 
-maximum delay allowed from edge of live, expressed in multiple of `EXT-X-TARGETDURATION`.
-if set to 10, the player will seek back to `liveSyncDurationCount` whenever the next fragment to be loaded is older than N-10, N being the last fragment of the live playlist.
-If set, this value must be stricly superior to `liveSyncDurationCount`
-a value too close from `liveSyncDurationCount` is likely to cause playback stalls.
+Maximum delay allowed from edge of live, expressed in multiple of `EXT-X-TARGETDURATION`.
+If set to 10, the player will seek back to `liveSyncDurationCount` whenever the next fragment to be loaded is older than N-10, N being the last fragment of the live playlist.
+If set, this value must be strictly superior to `liveSyncDurationCount`.
+A value too close from `liveSyncDurationCount` is likely to cause playback stalls.
 
 ### `liveSyncDuration`
 
@@ -736,7 +776,7 @@ A value too low (inferior to ~3 segment durations) is likely to cause playback s
 
 Alternative parameter to `liveMaxLatencyDurationCount`, expressed in seconds vs number of segments.
 If defined in the configuration object, `liveMaxLatencyDuration` will take precedence over the default `liveMaxLatencyDurationCount`.
-If set, this value must be stricly superior to `liveSyncDuration` which must be defined as well.
+If set, this value must be strictly superior to `liveSyncDuration` which must be defined as well.
 You can't define this parameter and either `liveSyncDurationCount` or `liveMaxLatencyDurationCount` in your configuration object at the same time.
 A value too close from `liveSyncDuration` is likely to cause playback stalls.
 
@@ -2019,34 +2059,79 @@ HLS.js supports playback of X-ASSET-URI and X-ASSET-LIST m3u8 playlists schedule
 
 The data includes the list of Interstitial events with their asset lists, the schedule of event and primary segment items, information about which items and assets are buffering and playing, the player instance currently buffering media, and the queue of players responsible for the streaming of assets.
 
-Use `skip()` to skip the current interstitial. Use `primary`, `playout`, and `integrated` to get `currentTime`, `duration` and to seek along the respective timeline.
+Use `skip()` to skip the current interstitial.
+Use `primary` and `integrated` playhead objects to get `currentTime`, `duration` and to seek along the respective timeline.
+Use `interstitialPlayer` to get active intersititial info (playing or upcoming buffering break) like `currentTime`, `duration`, and `playingIndex` within an Interstital break.
 
 ```ts
 interface InterstitialsManager {
-  events: InterstitialEvent[]; // An array of Interstitials (events) parsed from the latest media playlist update
   schedule: InterstitialScheduleItem[]; // An array of primary and event items with start and end times representing the scheduled program
-  playerQueue: HlsAssetPlayer[]; // And array of child Hls instances created to preload and stream Interstitial asset content
-  bufferingPlayer: HlsAssetPlayer | null; // The child Hls instance assigned to streaming media at the edge of the forward buffer
+  integrated: PlayheadTimes; // playhead mapping and control that applies the X-TIMELINE-OCCUPIES attribute to each event item
+  primary: PlayheadTimes; // playhead mapping and control based on the primary content
+
+  interstitialPlayer: InterstitialPlayer | null; // interface for interstitial playback state
+
   bufferingAsset: InterstitialAssetItem | null; // The Interstitial asset currently being streamed
   bufferingItem: InterstitialScheduleItem | null; // The primary item or event item currently being streamed
   bufferingIndex: number; // The index of `bufferingItem` in the `schedule` array
+
   playingAsset: InterstitialAssetItem | null; // The Interstitial asset currently being streamed
   playingItem: InterstitialScheduleItem | null; // The primary item or event item currently being played
   playingIndex: number; // The index of `playingItem` in the `schedule` array
-  waitingIndex: number; // The index of the item whose asset list is being loaded in the `schedule` array
-  primary: PlayheadTimes; // playhead mapping and seekTo method based on the primary content
-  playout: PlayheadTimes; // playhead mapping and seekTo method based on playout of all items in the `schedule` array
-  integrated: PlayheadTimes; // playhead mapping and seekTo method that applies the X-TIMELINE-OCCUPIES attribute to each event item
+
+  events: InterstitialEvent[]; // An array of Interstitials (events) parsed from the latest media playlist update
+  playerQueue: HlsAssetPlayer[]; // And array of child Hls instances created to preload and stream Interstitial asset content
+
   skip: () => void; // A method for skipping the currently playing event item, provided it is not jump restricted
 }
 
 type PlayheadTimes = {
   bufferedEnd: number; // The buffer end time relative to the playhead in the scheduled program
-  currentTime: number; // The current playhead time in the scheduled program
+  currentTime: number; // (get/set) The current playhead time in the scheduled program
   duration: number; // The time at the end of the scheduled program
   seekableStart: number; // The earliest available time where media is available (maps to the start of the first segment in primary media playlists)
-  seekTo: (time: number) => void; // A method for seeking to the designated time the scheduled program
 };
+
+interface InterstitialPlayer {
+  currentTime: number; // (get/set) The current playhead time within the interstitial break (no-op prior to playback)
+  duration: number; // the playout duration of the interstitial break
+  assetPlayers: (HlsAssetPlayer | null)[]; // The asset players assigned to the break asset list
+  playingIndex: number; // The index of the currently playing asset (or -1 prior to playback)
+  scheduleItem: InterstitialScheduleEventItem | null; // The interstitial schedule item for the break
+}
+```
+
+The interstials manager can be used to get various apects of interstitial playback.
+
+Time remaining in interstial event break:
+
+```js
+const interstitialPlayer = hls.interstitialsManager.interstitialPlayer;
+// Is the interstitialPlayer playing an asset?
+if (interstitialPlayer && interstitialPlayer.playingIndex > -1) {
+  const timeRemaining = Math.ceil(
+    interstitialPlayer.duration - interstitialPlayer.currentTime,
+  );
+}
+```
+
+The last watched position of primary content:
+
+```js
+const primaryLastWatched = hls.interstitialsManager.primary.currentTime;
+```
+
+Integrated timeline position and time ranges:
+
+```js
+const currentTime = hls.interstitialsManager.integrated.currentTime;
+const timelineRanges = hls.interstitialsManager.schedule.map((item) => {
+  return {
+    interstitial: item.event,
+    start: item.integrated.start,
+    end: item.integrated.end,
+  };
+});
 ```
 
 ### Interstitial Events
