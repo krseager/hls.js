@@ -40,6 +40,10 @@ export default class GapController extends TaskLoop {
   private moved: boolean = false;
   private seeking: boolean = false;
   private buffered: Partial<Record<SourceBufferName, TimeRanges>> = {};
+  private lastSkipPosition: number | null = null;
+  private lastSkipTime = 0;
+  private lastNudgePosition: number | null = null;
+  private lastNudgeTime = 0;
 
   private lastCurrentTime: number = 0;
   public ended: number = 0;
@@ -476,11 +480,32 @@ export default class GapController extends TaskLoop {
       (stalledDurationMs > config.highBufferWatchdogPeriod * 1000 ||
         this.waiting)
     ) {
-      this.warn('Trying to nudge playhead over buffer-hole');
-      // Try to nudge currentTime over a buffer hole if we've been stalling for the configured amount of seconds
-      // We only try to jump the hole if it's under the configured size
-      this._tryNudgeBuffer(bufferInfo);
+      if (
+        config.playPauseOnBufferStall &&
+        this.nudgeRetry < config.playPauseOnBufferStallMaxRetry
+      ) {
+        this.warn('Trying to play/pause over buffer-hole');
+        this._tryPlayPause();
+      } else {
+        this.warn('Trying to nudge playhead over buffer-hole');
+        // Try to nudge currentTime over a buffer hole if we've been stalling for the configured amount of seconds
+        // We only try to jump the hole if it's under the configured size
+        this._tryNudgeBuffer(bufferInfo);
+      }
     }
+  }
+
+  private async _tryPlayPause() {
+    const { media } = this;
+    if (!media) {
+      return;
+    }
+    this.nudgeRetry++;
+    this.log('Awaiting play to avoid rejecting a possible other play call.');
+    await media.play();
+    this.log('Pausing and unpausing to break stall.');
+    media.play();
+    media.pause();
   }
 
   private adjacentTraversal(bufferInfo: BufferInfo, currentTime: number) {
@@ -552,7 +577,10 @@ export default class GapController extends TaskLoop {
       const waiting =
         bufferInfo.len > 0 && bufferInfo.len < 1 && media.readyState < 3;
       const gapLength = startTime - currentTime;
-      if (gapLength > 0 && (bufferStarved || waiting)) {
+      if (
+        gapLength > (config.minBufferHoleSec || 0) &&
+        (bufferStarved || waiting)
+      ) {
         // Only allow large gaps to be skipped if it is a start gap, or all fragments in skip range are partial
         if (gapLength > config.maxBufferHole) {
           let startGap = false;
@@ -595,10 +623,30 @@ export default class GapController extends TaskLoop {
             }
           }
         }
-        const targetTime = Math.max(
-          startTime + SKIP_BUFFER_RANGE_START,
-          currentTime + SKIP_BUFFER_HOLE_STEP_SECONDS,
-        );
+        // Apply throttling if configured
+        const throttleMs = config.skipBufferHoleThrottleMs;
+        if (throttleMs !== undefined) {
+          const now = self.performance.now();
+          const isSamePosition =
+            this.lastSkipPosition !== null &&
+            Math.abs(this.lastSkipPosition - currentTime) < 0.001; // Allow small floating point differences
+          if (isSamePosition) {
+            const timeSinceLastSkip = now - this.lastSkipTime;
+            if (timeSinceLastSkip < throttleMs) {
+              // Throttled: skip this attempt
+              return 0;
+            }
+          }
+          // Update tracking: either position changed or throttle time passed
+          this.lastSkipPosition = currentTime;
+          this.lastSkipTime = now;
+        }
+        const targetTime =
+          Math.max(
+            startTime + SKIP_BUFFER_RANGE_START,
+            currentTime + SKIP_BUFFER_HOLE_STEP_SECONDS,
+            config.minSkipBufferHoleDurationSec || 0,
+          ) + (config.skipBufferHolePaddingSec || 0);
         this.warn(
           `skipping hole, adjusting currentTime from ${currentTime} to ${targetTime}`,
         );
@@ -643,10 +691,32 @@ export default class GapController extends TaskLoop {
       return 0;
     }
     const currentTime = media.currentTime;
+    // Apply throttling if configured
+    const throttleMs = config.nudgeThrottleMs;
+    if (throttleMs !== undefined) {
+      const now = self.performance.now();
+      const isSamePosition =
+        this.lastNudgePosition !== null &&
+        Math.abs(this.lastNudgePosition - currentTime) < 0.001; // Allow small floating point differences
+      if (isSamePosition) {
+        const timeSinceLastNudge = now - this.lastNudgeTime;
+        if (timeSinceLastNudge < throttleMs) {
+          // Throttled: skip this attempt
+          return 0;
+        }
+      }
+      // Update tracking: either position changed or throttle time passed
+      this.lastNudgePosition = currentTime;
+      this.lastNudgeTime = now;
+    }
     this.nudgeRetry++;
 
     if (nudgeRetry < config.nudgeMaxRetry) {
-      const targetTime = currentTime + (nudgeRetry + 1) * config.nudgeOffset;
+      const targetTime =
+        Math.max(
+          currentTime + (nudgeRetry + 1) * config.nudgeOffset,
+          config.minNudgeDurationSec || 0,
+        ) + (config.nudgePaddingSec || 0);
       // playback stalled in buffered area ... let's nudge currentTime to try to overcome this
       const error = new Error(
         `Nudging 'currentTime' from ${currentTime} to ${targetTime}`,
