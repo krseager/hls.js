@@ -394,6 +394,7 @@ export default class LevelController extends BasePlaylistController {
     const altAudioEnabled = !!(
       config.audioStreamController && config.audioTrackController
     );
+    data.stats.parsing.end = performance.now();
     const edata: ManifestParsedData = {
       levels,
       audioTracks,
